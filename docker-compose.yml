@@ -9,4 +9,9 @@ services:
       # 오른쪽(/library/<플랫폼명>)은 코드가 "플랫폼 폴더"로 인식하는 이름입니다.
       - "D:/Downloads/Webtoon/Webtoon_Download:/library/naver"
       - "D:/Downloads/Webtoon/카카오 웹툰:/library/kakao"
+      # 읽음 진행률(progress.db) 저장용 - 컨테이너 재배포해도 유지됨
+      - "webtoon_data:/data"
     restart: unless-stopped
+
+volumes:
+  webtoon_data:

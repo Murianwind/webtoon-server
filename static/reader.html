@@ -10,90 +10,279 @@
 <header class="reader-topbar" id="topbar">
   <a class="back" id="backLink" href="/">←</a>
   <span id="chapterTitle"></span>
+  <button class="sidebar-toggle" id="sidebarToggle" aria-label="회차 목록">≡</button>
 </header>
+
 <div id="pages" class="pages"></div>
-<div id="nextChapter" class="next-chapter" style="display:none"></div>
+
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-header">
+    <span id="sidebarTitle">회차 목록</span>
+    <button id="sidebarClose" class="sidebar-close" aria-label="닫기">×</button>
+  </div>
+  <div id="sidebarList" class="sidebar-list"></div>
+</aside>
+<div id="sidebarOverlay" class="sidebar-overlay"></div>
 
 <script>
 const params = new URLSearchParams(location.search);
 const seriesId = params.get("series");
-const chapterId = params.get("chapter");
+const initialChapterId = params.get("chapter");
+const initialPage = parseInt(params.get("page") || "0", 10) || 0;
 
 document.getElementById("backLink").href = seriesId
   ? `/series.html?id=${encodeURIComponent(seriesId)}`
   : "/";
 
+let seriesData = null;       // { title, platform, chapters: [...] } (오름차순)
+let loadedChapters = [];     // 이 화면에 이미 붙인 회차들 (진행 순서대로)
+let currentChapterId = null;
+let currentPageIndex = 0;
+let isLoadingNext = false;
+let saveTimer = null;
+
+const pagesEl = document.getElementById("pages");
+const chapterTitleEl = document.getElementById("chapterTitle");
+const sidebarListEl = document.getElementById("sidebarList");
+
 function showError() {
-  document.getElementById("pages").innerHTML = `<div class="empty-state">회차를 불러올 수 없습니다.</div>`;
+  pagesEl.innerHTML = `<div class="empty-state">회차를 불러올 수 없습니다.</div>`;
 }
 
-async function load() {
-  if (!seriesId || !chapterId) return showError();
+function chapterById(id) {
+  return seriesData.chapters.find((c) => c.id === id) || null;
+}
 
-  const [seriesRes, pagesRes] = await Promise.all([
-    fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`),
-    fetch(`/api/chapters/${encodeURIComponent(chapterId)}/pages`),
-  ]);
-  if (!seriesRes.ok || !pagesRes.ok) return showError();
+function chapterIndexById(id) {
+  return seriesData.chapters.findIndex((c) => c.id === id);
+}
 
-  const seriesData = await seriesRes.json();
-  const pagesData = await pagesRes.json();
+// ---------------------------------------------------------------------
+// 회차 로딩 (무한 스크롤)
+// ---------------------------------------------------------------------
 
-  const chapters = seriesData.chapters; // 오름차순(과거 -> 최신)
-  const idx = chapters.findIndex((c) => c.id === chapterId);
-  const current = idx >= 0 ? chapters[idx] : null;
-  const next = idx >= 0 && idx < chapters.length - 1 ? chapters[idx + 1] : null;
+const loadMoreObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) loadNextChapter();
+    }
+  },
+  { rootMargin: "0px 0px 1200px 0px" }
+);
 
-  document.title = `${seriesData.title} - ${current ? current.label : ""}`;
-  document.getElementById("chapterTitle").textContent =
-    `${seriesData.title} · ${current ? current.label : ""}`;
+const pageObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      const key = entry.target.dataset.key;
+      if (entry.isIntersecting) {
+        visiblePages.set(key, entry.target);
+      } else {
+        visiblePages.delete(key);
+      }
+    }
+    updateCurrentFromVisible();
+  },
+  { threshold: 0.4 }
+);
 
-  const pagesEl = document.getElementById("pages");
-  pagesEl.innerHTML = "";
-  for (let i = 0; i < pagesData.page_count; i++) {
+const visiblePages = new Map();
+
+function updateCurrentFromVisible() {
+  if (visiblePages.size === 0) return;
+  let top = null;
+  for (const el of visiblePages.values()) {
+    const rect = el.getBoundingClientRect();
+    if (!top || rect.top < top.rect.top) top = { el, rect };
+  }
+  const chapterId = top.el.dataset.chapter;
+  const pageIndex = parseInt(top.el.dataset.page, 10);
+  if (chapterId !== currentChapterId || pageIndex !== currentPageIndex) {
+    currentChapterId = chapterId;
+    currentPageIndex = pageIndex;
+    onPositionChange();
+  }
+}
+
+function onPositionChange() {
+  const ch = chapterById(currentChapterId);
+  chapterTitleEl.textContent = ch ? `${seriesData.title} · ${ch.label}` : seriesData.title;
+  highlightSidebar();
+  scheduleSaveProgress();
+}
+
+function scheduleSaveProgress() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fetch(`/api/series/${encodeURIComponent(seriesId)}/progress`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapter_id: currentChapterId, page_index: currentPageIndex }),
+    }).catch(() => {});
+  }, 1200);
+}
+
+async function appendChapter(chapter, { scrollToPage = null } = {}) {
+  loadMoreObserver.disconnect();
+
+  const divider = document.createElement("div");
+  divider.className = "chapter-divider";
+  divider.dataset.chapterId = chapter.id;
+  divider.textContent = chapter.label;
+  pagesEl.appendChild(divider);
+
+  const res = await fetch(`/api/chapters/${encodeURIComponent(chapter.id)}/pages`);
+  const data = await res.json();
+  const pageCount = data.page_count || 0;
+
+  let targetImg = null;
+  let lastImg = null;
+  for (let i = 0; i < pageCount; i++) {
     const img = document.createElement("img");
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.src = `/api/chapters/${encodeURIComponent(chapterId)}/pages/${i}`;
+    img.dataset.chapter = chapter.id;
+    img.dataset.page = String(i);
+    img.dataset.key = `${chapter.id}:${i}`;
+    img.src = `/api/chapters/${encodeURIComponent(chapter.id)}/pages/${i}`;
     img.alt = `${i + 1}페이지`;
     pagesEl.appendChild(img);
+    pageObserver.observe(img);
+    lastImg = img;
+    if (scrollToPage !== null && i === scrollToPage) targetImg = img;
   }
 
-  const nextEl = document.getElementById("nextChapter");
-  nextEl.style.display = "block";
-  if (next) {
-    nextEl.innerHTML = `
-      <a class="next-card" href="/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(next.id)}">
-        <span class="eyebrow">다음 화</span>
-        <span class="next-title">${next.label} 보기 →</span>
-      </a>
-    `;
-  } else {
-    nextEl.innerHTML = `
-      <a class="next-card" href="/series.html?id=${encodeURIComponent(seriesId)}">
-        <span class="eyebrow">마지막 화입니다</span>
-        <span class="next-title">회차 목록으로 →</span>
-      </a>
-    `;
+  loadedChapters.push({ id: chapter.id, pageCount });
+
+  if (targetImg) {
+    const scrollNow = () => targetImg.scrollIntoView({ block: "start" });
+    if (targetImg.complete) scrollNow();
+    else targetImg.addEventListener("load", scrollNow, { once: true });
+  }
+
+  const idx = chapterIndexById(chapter.id);
+  const hasNext = idx >= 0 && idx < seriesData.chapters.length - 1;
+  if (hasNext && lastImg) {
+    loadMoreObserver.observe(lastImg);
+  } else if (!hasNext) {
+    appendEndCard();
   }
 }
 
-// 아래로 스크롤하면 상단바 숨김, 위로 스크롤하면 다시 표시
+async function loadNextChapter() {
+  if (isLoadingNext) return;
+  const last = loadedChapters[loadedChapters.length - 1];
+  if (!last) return;
+  const idx = chapterIndexById(last.id);
+  const next = idx >= 0 ? seriesData.chapters[idx + 1] : null;
+  if (!next) return;
+  isLoadingNext = true;
+  try {
+    await appendChapter(next);
+  } finally {
+    isLoadingNext = false;
+  }
+}
+
+function appendEndCard() {
+  const el = document.createElement("div");
+  el.className = "next-chapter";
+  el.innerHTML = `
+    <a class="next-card" href="/series.html?id=${encodeURIComponent(seriesId)}">
+      <span class="eyebrow">마지막 화입니다</span>
+      <span class="next-title">회차 목록으로 →</span>
+    </a>
+  `;
+  pagesEl.appendChild(el);
+}
+
+// ---------------------------------------------------------------------
+// 사이드 회차 패널
+// ---------------------------------------------------------------------
+
+function renderSidebar() {
+  const ordered = [...seriesData.chapters].reverse(); // 최신화가 위로
+  sidebarListEl.innerHTML = "";
+  for (const ch of ordered) {
+    const row = document.createElement("div");
+    row.className = "sidebar-row";
+    row.dataset.chapterId = ch.id;
+    row.textContent = ch.label;
+    row.addEventListener("click", () => {
+      if (loadedChapters.some((c) => c.id === ch.id)) {
+        const target = document.querySelector(`.chapter-divider[data-chapter-id="${ch.id}"]`);
+        if (target) target.scrollIntoView({ block: "start" });
+        closeSidebar();
+      } else {
+        location.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(ch.id)}&page=0`;
+      }
+    });
+    sidebarListEl.appendChild(row);
+  }
+  highlightSidebar();
+}
+
+function highlightSidebar() {
+  for (const row of sidebarListEl.querySelectorAll(".sidebar-row")) {
+    row.classList.toggle("active", row.dataset.chapterId === currentChapterId);
+  }
+}
+
+function openSidebar() {
+  document.getElementById("sidebar").classList.add("open");
+  document.getElementById("sidebarOverlay").classList.add("open");
+  const active = sidebarListEl.querySelector(".sidebar-row.active");
+  if (active) active.scrollIntoView({ block: "center" });
+}
+
+function closeSidebar() {
+  document.getElementById("sidebar").classList.remove("open");
+  document.getElementById("sidebarOverlay").classList.remove("open");
+}
+
+document.getElementById("sidebarToggle").addEventListener("click", openSidebar);
+document.getElementById("sidebarClose").addEventListener("click", closeSidebar);
+document.getElementById("sidebarOverlay").addEventListener("click", closeSidebar);
+
+// ---------------------------------------------------------------------
+// 상단바 자동 숨김
+// ---------------------------------------------------------------------
+
 let lastY = window.scrollY;
 const topbar = document.getElementById("topbar");
 window.addEventListener(
   "scroll",
   () => {
     const y = window.scrollY;
-    if (y > lastY && y > 80) {
-      topbar.classList.add("hidden");
-    } else {
-      topbar.classList.remove("hidden");
-    }
+    if (y > lastY && y > 80) topbar.classList.add("hidden");
+    else topbar.classList.remove("hidden");
     lastY = y;
   },
   { passive: true }
 );
+
+// ---------------------------------------------------------------------
+// 초기 로딩
+// ---------------------------------------------------------------------
+
+async function load() {
+  if (!seriesId || !initialChapterId) return showError();
+
+  const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`);
+  if (!res.ok) return showError();
+  seriesData = await res.json();
+
+  document.title = seriesData.title;
+  document.getElementById("sidebarTitle").textContent = seriesData.title;
+  renderSidebar();
+
+  const startChapter = chapterById(initialChapterId) || seriesData.chapters[0];
+  if (!startChapter) return showError();
+
+  currentChapterId = startChapter.id;
+  currentPageIndex = initialPage;
+  chapterTitleEl.textContent = `${seriesData.title} · ${startChapter.label}`;
+  highlightSidebar();
+
+  await appendChapter(startChapter, { scrollToPage: initialPage });
+}
 
 load();
 </script>

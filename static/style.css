@@ -55,6 +55,39 @@ a {
   color: var(--text);
 }
 
+/* ---------- 검색/정렬 툴바 (index.html) ---------- */
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px 0;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.search-input,
+.sort-select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-input::placeholder {
+  color: var(--text-dim);
+}
+
+.sort-select {
+  flex-shrink: 0;
+}
+
 /* ---------- 시리즈 그리드 (index.html) ---------- */
 
 .grid {
@@ -107,6 +140,41 @@ a {
   letter-spacing: 0.02em;
 }
 
+.card .unread-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #0a1a12;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card .list-icon {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+.card .list-icon:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
 .card .title {
   font-size: 13px;
   line-height: 1.3;
@@ -147,6 +215,38 @@ a {
   font-size: 13px;
 }
 
+/* ---------- 전체 읽음/안읽음 버튼 ---------- */
+
+.mark-all-row {
+  display: flex;
+  gap: 8px;
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 4px 16px 8px;
+}
+
+.mark-all-btn {
+  flex: 1;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mark-all-btn:hover {
+  border-color: var(--accent);
+}
+
+.mark-all-btn.ghost {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+/* ---------- 회차 목록 ---------- */
+
 .chapter-list {
   max-width: 700px;
   margin: 0 auto;
@@ -157,8 +257,10 @@ a {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   padding: 14px 4px;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
 }
 
 .chapter-row:hover {
@@ -166,11 +268,37 @@ a {
 }
 
 .chapter-row .label {
+  flex: 1;
   font-size: 15px;
+}
+
+.chapter-row.is-read .label {
+  color: var(--text-dim);
 }
 
 .chapter-row .arrow {
   color: var(--text-dim);
+}
+
+.read-toggle {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.read-toggle.read {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(41, 209, 127, 0.1);
 }
 
 /* ---------- 리더 (reader.html) ---------- */
@@ -194,6 +322,7 @@ a {
 }
 
 .reader-topbar #chapterTitle {
+  flex: 1;
   font-size: 14px;
   color: var(--text-dim);
   overflow: hidden;
@@ -204,6 +333,32 @@ a {
 .reader-topbar.hidden {
   opacity: 0;
   pointer-events: none;
+}
+
+.sidebar-toggle {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sidebar-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.chapter-divider {
+  width: 100%;
+  max-width: 720px;
+  padding: 22px 16px 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
 }
 
 .pages {
@@ -257,4 +412,86 @@ a {
 .next-chapter .next-title {
   font-size: 16px;
   color: var(--accent);
+}
+
+/* ---------- 사이드 회차 패널 (reader.html) ---------- */
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(300px, 82vw);
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+}
+
+.sidebar.open {
+  transform: translateX(0);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+
+.sidebar-close {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+}
+.sidebar-close:hover {
+  color: var(--text);
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.sidebar-row {
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.sidebar-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-row.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(41, 209, 127, 0.08);
+  font-weight: 600;
+}
+
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 30;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.sidebar-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
 }

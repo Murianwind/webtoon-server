@@ -10,43 +10,96 @@
 <header class="topbar">
   <h1>내 웹툰</h1>
 </header>
+<div class="toolbar">
+  <input id="searchInput" class="search-input" type="text" placeholder="제목 검색">
+  <select id="sortSelect" class="sort-select">
+    <option value="latest">최근 업데이트순</option>
+    <option value="unread">안읽은 회차 많은순</option>
+    <option value="title">제목순</option>
+  </select>
+</div>
 <main id="grid" class="grid"></main>
 
 <script>
 const PLATFORM_LABEL = { naver: "네이버", kakao: "카카오" };
 
-async function load() {
-  const grid = document.getElementById("grid");
-  let series;
-  try {
-    const res = await fetch("/api/series");
-    series = await res.json();
-  } catch (e) {
-    grid.innerHTML = `<div class="empty-state">목록을 불러오지 못했습니다.</div>`;
-    return;
-  }
+let allSeries = [];
+let query = "";
+let sortMode = "latest";
 
-  if (!series.length) {
-    grid.innerHTML = `<div class="empty-state">스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.</div>`;
+function sortSeries(list) {
+  const arr = [...list];
+  if (sortMode === "latest") {
+    arr.sort((a, b) => b.latest_update - a.latest_update);
+  } else if (sortMode === "unread") {
+    arr.sort((a, b) => b.unread_count - a.unread_count);
+  } else if (sortMode === "title") {
+    arr.sort((a, b) => a.title.localeCompare(b.title, "ko"));
+  }
+  return arr;
+}
+
+function render() {
+  const grid = document.getElementById("grid");
+  const q = query.trim().toLowerCase();
+  const filtered = q ? allSeries.filter((s) => s.title.toLowerCase().includes(q)) : allSeries;
+  const list = sortSeries(filtered);
+
+  if (!list.length) {
+    grid.innerHTML = `<div class="empty-state">${q ? "검색 결과가 없습니다." : "스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요."}</div>`;
     return;
   }
 
   grid.innerHTML = "";
-  for (const s of series) {
-    const card = document.createElement("a");
+  for (const s of list) {
+    const card = document.createElement("div");
     card.className = "card";
-    card.href = `/series.html?id=${encodeURIComponent(s.id)}`;
     card.innerHTML = `
       <div class="cover-wrap">
         <span class="platform-tag">${PLATFORM_LABEL[s.platform] || s.platform}</span>
+        ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
+        <a class="list-icon" href="/series.html?id=${encodeURIComponent(s.id)}" title="회차 목록" onclick="event.stopPropagation()">≡</a>
       </div>
       <div class="title">${s.title}</div>
       <div class="chapter-count">${s.chapter_count}화</div>
     `;
+    card.addEventListener("click", () => goContinue(s.id));
     grid.appendChild(card);
   }
 }
+
+async function goContinue(seriesId) {
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/continue`);
+    if (!res.ok) throw new Error("continue lookup failed");
+    const data = await res.json();
+    location.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(data.chapter_id)}&page=${data.page_index}`;
+  } catch (e) {
+    location.href = `/series.html?id=${encodeURIComponent(seriesId)}`;
+  }
+}
+
+async function load() {
+  const grid = document.getElementById("grid");
+  try {
+    const res = await fetch("/api/series");
+    allSeries = await res.json();
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state">목록을 불러오지 못했습니다.</div>`;
+    return;
+  }
+  render();
+}
+
+document.getElementById("searchInput").addEventListener("input", (e) => {
+  query = e.target.value;
+  render();
+});
+document.getElementById("sortSelect").addEventListener("change", (e) => {
+  sortMode = e.target.value;
+  render();
+});
 
 load();
 </script>

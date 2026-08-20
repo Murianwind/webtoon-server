@@ -2,14 +2,20 @@ import os
 import re
 import zipfile
 import hashlib
+import sqlite3
+import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # 라이브러리 루트: 이 폴더 바로 아래 1depth = 플랫폼(naver/kakao 등),
 # 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차
 LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
+
+# 읽음 진행률을 저장하는 SQLite 파일 (컨테이너 재시작에도 남도록 볼륨 마운트 필요)
+DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 IMAGE_MEDIA_TYPES = {
@@ -61,6 +67,100 @@ def parse_chapter_label(stem: str):
 
 
 # ---------------------------------------------------------------------------
+# 읽음 진행률 저장소 (SQLite)
+# ---------------------------------------------------------------------------
+
+
+def _db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS progress (
+            series_id TEXT PRIMARY KEY,
+            chapter_id TEXT NOT NULL,
+            chapter_index INTEGER NOT NULL,
+            page_index INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def get_progress(series_id: str):
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT chapter_id, chapter_index, page_index FROM progress WHERE series_id = ?",
+            (series_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
+
+
+def get_all_progress():
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT series_id, chapter_id, chapter_index, page_index FROM progress"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        r[0]: {"chapter_id": r[1], "chapter_index": r[2], "page_index": r[3]}
+        for r in rows
+    }
+
+
+def set_progress(series_id: str, chapter_id: str, chapter_index: int, page_index: int):
+    conn = _db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(series_id) DO UPDATE SET
+                chapter_id = excluded.chapter_id,
+                chapter_index = excluded.chapter_index,
+                page_index = excluded.page_index,
+                updated_at = excluded.updated_at
+            """,
+            (series_id, chapter_id, chapter_index, page_index, datetime.datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_progress(series_id: str):
+    conn = _db()
+    try:
+        conn.execute("DELETE FROM progress WHERE series_id = ?", (series_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# 회차의 page_index로 이 값이 저장되어 있으면 "그 회차까지 다 읽었다"는 뜻.
+# /continue 조회 시 이 값을 만나면 실제 페이지 수와 비교해 다음 화로 자동 이동시킨다.
+PAGE_FINISHED_SENTINEL = 1_000_000
+
+
+def apply_read_boundary(series_id: str, chapters: list, index: int):
+    """index번째 회차까지(포함) 읽음으로 표시. index가 음수면 전부 안읽음(진행률 삭제)."""
+    if index < 0:
+        delete_progress(series_id)
+        return
+    index = min(index, len(chapters) - 1)
+    chapter = chapters[index]
+    set_progress(series_id, chapter["id"], index, PAGE_FINISHED_SENTINEL)
+
+
+# ---------------------------------------------------------------------------
 # 라이브러리 스캔 (인메모리 카탈로그, 재시작/재스캔 시 갱신)
 # ---------------------------------------------------------------------------
 
@@ -107,6 +207,7 @@ def scan_library():
                 chapters_map[chapter_id] = full_path
 
             chapters.sort(key=lambda c: (c["sort_key"], c["filename"]))
+            latest_mtime = max((os.path.getmtime(c["path"]) for c in chapters), default=0)
 
             series_map[series_id] = {
                 "id": series_id,
@@ -114,6 +215,7 @@ def scan_library():
                 "title": series_name,
                 "path": series_path,
                 "chapters": chapters,
+                "latest_mtime": latest_mtime,
             }
 
     return series_map, chapters_map
@@ -157,14 +259,21 @@ def _list_images(zip_path: str):
 
 @app.get("/api/series")
 def list_series():
+    all_progress = get_all_progress()
     result = []
     for s in _catalog["series"].values():
+        total = len(s["chapters"])
+        prog = all_progress.get(s["id"])
+        # 진행률 기록이 없으면 전부 안읽음, 있으면 마지막으로 본 회차 이후를 안읽음으로 취급
+        unread = total if not prog else max(total - prog["chapter_index"] - 1, 0)
         result.append(
             {
                 "id": s["id"],
                 "platform": s["platform"],
                 "title": s["title"],
-                "chapter_count": len(s["chapters"]),
+                "chapter_count": total,
+                "unread_count": unread,
+                "latest_update": s["latest_mtime"],
                 "cover_url": f"/api/series/{s['id']}/cover",
             }
         )
@@ -172,18 +281,101 @@ def list_series():
     return result
 
 
+@app.get("/api/series/{series_id}/continue")
+def continue_reading(series_id: str):
+    """이 시리즈를 열었을 때 바로 이동해야 할 (회차, 페이지) 반환"""
+    s = _catalog["series"].get(series_id)
+    if not s:
+        raise HTTPException(404, "series not found")
+    if not s["chapters"]:
+        raise HTTPException(404, "no chapters")
+
+    prog = get_progress(series_id)
+    if prog:
+        idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == prog["chapter_id"]), None)
+        if idx is not None:
+            page_count = len(_list_images(s["chapters"][idx]["path"]))
+            # 저장된 page_index가 실제 페이지 수 이상이면 "이 회차는 다 읽음" 신호 ->
+            # 다음 화가 있으면 그쪽으로, 없으면(마지막 화) 마지막 페이지로 보정
+            if prog["page_index"] >= page_count and idx + 1 < len(s["chapters"]):
+                nxt = s["chapters"][idx + 1]
+                return {"chapter_id": nxt["id"], "page_index": 0}
+            clamped_page = min(prog["page_index"], max(page_count - 1, 0))
+            return {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
+
+    first = s["chapters"][0]
+    return {"chapter_id": first["id"], "page_index": 0}
+
+
+class ProgressIn(BaseModel):
+    chapter_id: str
+    page_index: int = 0
+
+
+@app.put("/api/series/{series_id}/progress")
+def save_progress(series_id: str, body: ProgressIn):
+    s = _catalog["series"].get(series_id)
+    if not s:
+        raise HTTPException(404, "series not found")
+    idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == body.chapter_id), None)
+    if idx is None:
+        raise HTTPException(404, "chapter not found in series")
+    set_progress(series_id, body.chapter_id, idx, max(body.page_index, 0))
+    return {"ok": True}
+
+
+class ReadStateIn(BaseModel):
+    scope: str  # "all" | "chapter"
+    read: bool
+    chapter_id: str | None = None
+
+
+@app.put("/api/series/{series_id}/read-state")
+def set_read_state(series_id: str, body: ReadStateIn):
+    s = _catalog["series"].get(series_id)
+    if not s:
+        raise HTTPException(404, "series not found")
+    chapters = s["chapters"]
+    if not chapters:
+        raise HTTPException(404, "no chapters")
+
+    if body.scope == "all":
+        target_index = len(chapters) - 1 if body.read else -1
+    elif body.scope == "chapter":
+        if not body.chapter_id:
+            raise HTTPException(400, "chapter_id is required for scope=chapter")
+        idx = next((i for i, c in enumerate(chapters) if c["id"] == body.chapter_id), None)
+        if idx is None:
+            raise HTTPException(404, "chapter not found in series")
+        # read=true  -> 이 회차까지(포함) 전부 읽음 처리
+        # read=false -> 이 회차부터(포함) 안읽음으로 되돌림 (바로 앞 회차까지만 읽음 유지)
+        target_index = idx if body.read else idx - 1
+    else:
+        raise HTTPException(400, "scope must be 'all' or 'chapter'")
+
+    apply_read_boundary(series_id, chapters, target_index)
+    return {"ok": True}
+
+
 @app.get("/api/series/{series_id}/chapters")
 def list_chapters(series_id: str):
     s = _catalog["series"].get(series_id)
     if not s:
         raise HTTPException(404, "series not found")
+    prog = get_progress(series_id)
+    read_index = prog["chapter_index"] if prog else -1
     return {
         "id": s["id"],
         "platform": s["platform"],
         "title": s["title"],
         "chapters": [
-            {"id": c["id"], "label": c["label"], "sort_key": c["sort_key"]}
-            for c in s["chapters"]
+            {
+                "id": c["id"],
+                "label": c["label"],
+                "sort_key": c["sort_key"],
+                "read": i <= read_index,
+            }
+            for i, c in enumerate(s["chapters"])
         ],
     }
 

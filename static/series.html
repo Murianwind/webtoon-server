@@ -12,49 +12,100 @@
   <h1 id="pageTitle">회차 목록</h1>
 </header>
 <div class="series-header" id="seriesHeader"></div>
+<div class="mark-all-row" id="markAllRow">
+  <button id="markAllRead" class="mark-all-btn">전체 읽음으로 표시</button>
+  <button id="markAllUnread" class="mark-all-btn ghost">전체 안읽음으로 표시</button>
+</div>
 <main id="chapterList" class="chapter-list"></main>
 
 <script>
 const params = new URLSearchParams(location.search);
 const seriesId = params.get("id");
 
-async function load() {
-  if (!seriesId) {
-    document.getElementById("chapterList").innerHTML = `<div class="empty-state">잘못된 접근입니다.</div>`;
-    return;
-  }
-
+async function fetchChapters() {
   const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`);
-  if (!res.ok) {
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function setReadState(body) {
+  await fetch(`/api/series/${encodeURIComponent(seriesId)}/read-state`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await render();
+}
+
+function renderChapterRow(ch) {
+  const row = document.createElement("div");
+  row.className = "chapter-row" + (ch.read ? " is-read" : "");
+
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = ch.label;
+  row.appendChild(label);
+
+  const toggle = document.createElement("button");
+  toggle.className = "read-toggle" + (ch.read ? " read" : "");
+  toggle.title = ch.read ? "이 화부터 안읽음으로 표시" : "이 화까지 읽음으로 표시";
+  toggle.textContent = ch.read ? "✓" : "○";
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setReadState({ scope: "chapter", chapter_id: ch.id, read: !ch.read });
+  });
+  row.appendChild(toggle);
+
+  const arrow = document.createElement("span");
+  arrow.className = "arrow";
+  arrow.textContent = "›";
+  row.appendChild(arrow);
+
+  row.addEventListener("click", () => {
+    location.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(ch.id)}`;
+  });
+
+  return row;
+}
+
+async function render() {
+  const data = await fetchChapters();
+  if (!data) {
     document.getElementById("chapterList").innerHTML = `<div class="empty-state">시리즈를 찾을 수 없습니다.</div>`;
+    document.getElementById("markAllRow").style.display = "none";
     return;
   }
-  const data = await res.json();
 
   document.title = data.title;
+  const platformLabel = data.platform === "naver" ? "네이버" : data.platform === "kakao" ? "카카오" : data.platform;
+  const unread = data.chapters.filter((c) => !c.read).length;
   document.getElementById("seriesHeader").innerHTML = `
     <h2>${data.title}</h2>
-    <div class="sub">${data.chapters.length}화 · ${data.platform === "naver" ? "네이버" : data.platform === "kakao" ? "카카오" : data.platform}</div>
+    <div class="sub">${data.chapters.length}화 · ${platformLabel} · 안읽음 ${unread}화</div>
   `;
 
-  // 최신 화가 위로 오도록 표시 (읽기는 아래→위 순서로 진행하는 것이 자연스러움)
+  // 최신 화가 위로 오도록 표시
   const ordered = [...data.chapters].reverse();
-
   const list = document.getElementById("chapterList");
   list.innerHTML = "";
   for (const ch of ordered) {
-    const row = document.createElement("a");
-    row.className = "chapter-row";
-    row.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(ch.id)}`;
-    row.innerHTML = `
-      <span class="label">${ch.label}</span>
-      <span class="arrow">›</span>
-    `;
-    list.appendChild(row);
+    list.appendChild(renderChapterRow(ch));
   }
 }
 
-load();
+document.getElementById("markAllRead").addEventListener("click", () => {
+  setReadState({ scope: "all", read: true });
+});
+document.getElementById("markAllUnread").addEventListener("click", () => {
+  setReadState({ scope: "all", read: false });
+});
+
+if (!seriesId) {
+  document.getElementById("chapterList").innerHTML = `<div class="empty-state">잘못된 접근입니다.</div>`;
+  document.getElementById("markAllRow").style.display = "none";
+} else {
+  render();
+}
 </script>
 </body>
 </html>
