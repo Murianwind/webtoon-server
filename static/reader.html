@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>읽는 중...</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="reader-body">
+<header class="reader-topbar" id="topbar">
+  <a class="back" id="backLink" href="/">←</a>
+  <span id="chapterTitle"></span>
+</header>
+<div id="pages" class="pages"></div>
+<div id="nextChapter" class="next-chapter" style="display:none"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const seriesId = params.get("series");
+const chapterId = params.get("chapter");
+
+document.getElementById("backLink").href = seriesId
+  ? `/series.html?id=${encodeURIComponent(seriesId)}`
+  : "/";
+
+function showError() {
+  document.getElementById("pages").innerHTML = `<div class="empty-state">회차를 불러올 수 없습니다.</div>`;
+}
+
+async function load() {
+  if (!seriesId || !chapterId) return showError();
+
+  const [seriesRes, pagesRes] = await Promise.all([
+    fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`),
+    fetch(`/api/chapters/${encodeURIComponent(chapterId)}/pages`),
+  ]);
+  if (!seriesRes.ok || !pagesRes.ok) return showError();
+
+  const seriesData = await seriesRes.json();
+  const pagesData = await pagesRes.json();
+
+  const chapters = seriesData.chapters; // 오름차순(과거 -> 최신)
+  const idx = chapters.findIndex((c) => c.id === chapterId);
+  const current = idx >= 0 ? chapters[idx] : null;
+  const next = idx >= 0 && idx < chapters.length - 1 ? chapters[idx + 1] : null;
+
+  document.title = `${seriesData.title} - ${current ? current.label : ""}`;
+  document.getElementById("chapterTitle").textContent =
+    `${seriesData.title} · ${current ? current.label : ""}`;
+
+  const pagesEl = document.getElementById("pages");
+  pagesEl.innerHTML = "";
+  for (let i = 0; i < pagesData.page_count; i++) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.src = `/api/chapters/${encodeURIComponent(chapterId)}/pages/${i}`;
+    img.alt = `${i + 1}페이지`;
+    pagesEl.appendChild(img);
+  }
+
+  const nextEl = document.getElementById("nextChapter");
+  nextEl.style.display = "block";
+  if (next) {
+    nextEl.innerHTML = `
+      <a class="next-card" href="/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(next.id)}">
+        <span class="eyebrow">다음 화</span>
+        <span class="next-title">${next.label} 보기 →</span>
+      </a>
+    `;
+  } else {
+    nextEl.innerHTML = `
+      <a class="next-card" href="/series.html?id=${encodeURIComponent(seriesId)}">
+        <span class="eyebrow">마지막 화입니다</span>
+        <span class="next-title">회차 목록으로 →</span>
+      </a>
+    `;
+  }
+}
+
+// 아래로 스크롤하면 상단바 숨김, 위로 스크롤하면 다시 표시
+let lastY = window.scrollY;
+const topbar = document.getElementById("topbar");
+window.addEventListener(
+  "scroll",
+  () => {
+    const y = window.scrollY;
+    if (y > lastY && y > 80) {
+      topbar.classList.add("hidden");
+    } else {
+      topbar.classList.remove("hidden");
+    }
+    lastY = y;
+  },
+  { passive: true }
+);
+
+load();
+</script>
+</body>
+</html>

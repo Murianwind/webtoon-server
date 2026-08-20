@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>회차 목록</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a href="/" class="back">←</a>
+  <h1 id="pageTitle">회차 목록</h1>
+</header>
+<div class="series-header" id="seriesHeader"></div>
+<main id="chapterList" class="chapter-list"></main>
+
+<script>
+const params = new URLSearchParams(location.search);
+const seriesId = params.get("id");
+
+async function load() {
+  if (!seriesId) {
+    document.getElementById("chapterList").innerHTML = `<div class="empty-state">잘못된 접근입니다.</div>`;
+    return;
+  }
+
+  const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/chapters`);
+  if (!res.ok) {
+    document.getElementById("chapterList").innerHTML = `<div class="empty-state">시리즈를 찾을 수 없습니다.</div>`;
+    return;
+  }
+  const data = await res.json();
+
+  document.title = data.title;
+  document.getElementById("seriesHeader").innerHTML = `
+    <h2>${data.title}</h2>
+    <div class="sub">${data.chapters.length}화 · ${data.platform === "naver" ? "네이버" : data.platform === "kakao" ? "카카오" : data.platform}</div>
+  `;
+
+  // 최신 화가 위로 오도록 표시 (읽기는 아래→위 순서로 진행하는 것이 자연스러움)
+  const ordered = [...data.chapters].reverse();
+
+  const list = document.getElementById("chapterList");
+  list.innerHTML = "";
+  for (const ch of ordered) {
+    const row = document.createElement("a");
+    row.className = "chapter-row";
+    row.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(ch.id)}`;
+    row.innerHTML = `
+      <span class="label">${ch.label}</span>
+      <span class="arrow">›</span>
+    `;
+    list.appendChild(row);
+  }
+}
+
+load();
+</script>
+</body>
+</html>

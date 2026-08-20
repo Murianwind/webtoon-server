@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>내 웹툰</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>내 웹툰</h1>
+</header>
+<main id="grid" class="grid"></main>
+
+<script>
+const PLATFORM_LABEL = { naver: "네이버", kakao: "카카오" };
+
+async function load() {
+  const grid = document.getElementById("grid");
+  let series;
+  try {
+    const res = await fetch("/api/series");
+    series = await res.json();
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state">목록을 불러오지 못했습니다.</div>`;
+    return;
+  }
+
+  if (!series.length) {
+    grid.innerHTML = `<div class="empty-state">스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.</div>`;
+    return;
+  }
+
+  grid.innerHTML = "";
+  for (const s of series) {
+    const card = document.createElement("a");
+    card.className = "card";
+    card.href = `/series.html?id=${encodeURIComponent(s.id)}`;
+    card.innerHTML = `
+      <div class="cover-wrap">
+        <span class="platform-tag">${PLATFORM_LABEL[s.platform] || s.platform}</span>
+        <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
+      </div>
+      <div class="title">${s.title}</div>
+      <div class="chapter-count">${s.chapter_count}화</div>
+    `;
+    grid.appendChild(card);
+  }
+}
+
+load();
+</script>
+</body>
+</html>
