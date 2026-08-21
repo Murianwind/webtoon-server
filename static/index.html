@@ -190,7 +190,7 @@ function render() {
         <button class="select-toggle" title="읽음 상태 관리용 선택" aria-label="읽음 상태 관리용 선택">${isSelected ? "●" : "○"}</button>
       </div>
       <div class="title">${s.title}</div>
-      <div class="chapter-count">${s.chapter_count}화</div>
+      <div class="chapter-count">${s.chapter_count - s.unread_count}화/${s.chapter_count}화</div>
     `;
     card.querySelector(".select-toggle").addEventListener("click", (e) => {
       e.stopPropagation();
