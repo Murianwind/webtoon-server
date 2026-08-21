@@ -25,7 +25,7 @@ LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
 DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
 
 # 외부(디스코드 등)에 공개되는 URL을 만들 때 쓰는 기준 주소.
-# 예: https://komga.murian.ddnsfree.com (Komga가 쓰던 도메인을 그대로 재사용)
+# 예: https://your-domain.example.com
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
 # 라이브러리 자동 재스캔 주기(초). 기본 2시간. 0 이하로 설정하면 자동 재스캔을 끈다.

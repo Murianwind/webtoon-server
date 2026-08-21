@@ -3,18 +3,18 @@ services:
     build: .
     container_name: webtoon-server
     ports:
-      - "25600:8000"
+      - "${HOST_PORT:-8000}:8000"
     environment:
-      # hermes 알림 스크립트가 만드는 바로가기가 이 주소 기준으로 생성됩니다.
-      # Komga가 쓰던 외부 도메인을 그대로 재사용하는 경우 아래처럼 두면 됩니다.
-      - "PUBLIC_BASE_URL=https://komga.murian.ddnsfree.com"
+      # hermes 알림 스크립트 같은 외부 알림이 만드는 바로가기가 이 주소 기준으로 생성됩니다.
+      - "PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}"
       # 라이브러리 자동 재스캔 주기(초). 기본 7200(2시간). 0으로 두면 자동 재스캔을 끔.
-      - "RESCAN_INTERVAL_SECONDS=7200"
+      - "RESCAN_INTERVAL_SECONDS=${RESCAN_INTERVAL_SECONDS:-7200}"
     volumes:
-      # 왼쪽(호스트 경로)을 실제 PC 폴더로 맞춰주세요.
+      # 아래 두 변수(LIBRARY_..._PATH)에 실제 웹툰 폴더 경로를 넣어주세요.
       # 오른쪽(/library/<플랫폼명>)은 코드가 "플랫폼 폴더"로 인식하는 이름입니다.
-      - "D:/Downloads/Webtoon/Webtoon_Download:/library/naver"
-      - "D:/Downloads/Webtoon/카카오 웹툰:/library/kakao"
+      # 플랫폼을 더 추가/제거하고 싶으면 이 volumes 목록 자체를 늘리거나 줄이면 됩니다.
+      - "${LIBRARY_NAVER_PATH}:/library/naver"
+      - "${LIBRARY_KAKAO_PATH}:/library/kakao"
       # 읽음 진행률(progress.db) 저장용 - 컨테이너 재배포해도 유지됨
       - "webtoon_data:/data"
     restart: unless-stopped
