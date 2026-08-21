@@ -16,6 +16,7 @@
 <body>
 <header class="topbar">
   <h1>내 웹툰</h1>
+  <button id="settingsBtn" class="rescan-btn" title="라이브러리/백업 설정" aria-label="설정">⚙</button>
   <button id="rescanBtn" class="rescan-btn" title="새로고침(재스캔)" aria-label="재스캔">⟳</button>
 </header>
 <div class="toolbar">
@@ -27,6 +28,33 @@
   </select>
 </div>
 <div id="filterTabs" class="filter-tabs"></div>
+
+<div id="settingsPanel" class="read-action-panel" style="display:none">
+  <div class="read-action-header">
+    <span>라이브러리 / 백업</span>
+    <button id="settingsClose" class="read-action-close" aria-label="닫기">×</button>
+  </div>
+  <div id="settingsBody">
+    <div class="settings-section">
+      <div class="settings-section-title">등록된 라이브러리</div>
+      <div id="registeredLibList" class="lib-list"></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">등록 가능한 폴더</div>
+      <div id="availableLibList" class="lib-list"></div>
+      <div class="settings-hint">삭제(등록 해제)해도 실제 폴더나 zip 파일은 절대 지워지지 않습니다.</div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">백업 / 복원</div>
+      <div class="settings-hint">읽음 진행률, 검색/정렬/필터 설정, 라이브러리 등록 상태를 전부 포함합니다.</div>
+      <div class="read-action-picker-buttons">
+        <a id="backupBtn" href="/api/backup" class="mark-all-btn" download>백업 다운로드</a>
+        <button id="restoreBtn" class="mark-all-btn ghost">복원</button>
+      </div>
+      <input id="restoreFileInput" type="file" accept="application/json" style="display:none">
+    </div>
+  </div>
+</div>
 
 <div id="readActionPanel" class="read-action-panel" style="display:none">
   <div class="read-action-header">
@@ -367,6 +395,118 @@ rescanBtn.addEventListener("click", async () => {
   } finally {
     rescanBtn.disabled = false;
     rescanBtn.classList.remove("spinning");
+  }
+});
+
+// ---------------------------------------------------------------------
+// 설정 패널: 라이브러리 등록/해제 + 백업/복원
+// ---------------------------------------------------------------------
+
+const settingsPanel = document.getElementById("settingsPanel");
+
+async function renderLibraryLists() {
+  const registeredEl = document.getElementById("registeredLibList");
+  const availableEl = document.getElementById("availableLibList");
+  registeredEl.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
+  availableEl.innerHTML = "";
+
+  let data;
+  try {
+    const res = await fetch("/api/libraries");
+    data = await res.json();
+  } catch (e) {
+    registeredEl.innerHTML = `<div class="empty-state">불러오지 못했습니다.</div>`;
+    return;
+  }
+
+  registeredEl.innerHTML = "";
+  if (data.registered.length === 0) {
+    registeredEl.innerHTML = `<div class="picker-loading">등록된 라이브러리가 없습니다.</div>`;
+  }
+  for (const name of data.registered) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    row.innerHTML = `
+      <span class="lib-name">${name}</span>
+      <button class="lib-action-btn" data-action="unregister" data-name="${name}">삭제</button>
+    `;
+    registeredEl.appendChild(row);
+  }
+
+  if (data.available.length === 0) {
+    availableEl.innerHTML = `<div class="picker-loading">추가로 등록할 수 있는 폴더가 없습니다.</div>`;
+  }
+  for (const name of data.available) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    row.innerHTML = `
+      <span class="lib-name">${name}</span>
+      <button class="lib-action-btn add" data-action="register" data-name="${name}">등록</button>
+    `;
+    availableEl.appendChild(row);
+  }
+
+  for (const btn of document.querySelectorAll(".lib-action-btn")) {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.name;
+      const action = btn.dataset.action;
+      btn.disabled = true;
+      try {
+        if (action === "register") {
+          await fetch(`/api/libraries/${encodeURIComponent(name)}/register`, { method: "POST" });
+        } else {
+          await fetch(`/api/libraries/${encodeURIComponent(name)}`, { method: "DELETE" });
+        }
+        await renderLibraryLists();
+        await load();
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+}
+
+function openSettingsPanel() {
+  settingsPanel.style.display = "block";
+  renderLibraryLists();
+}
+function closeSettingsPanel() {
+  settingsPanel.style.display = "none";
+}
+
+document.getElementById("settingsBtn").addEventListener("click", () => {
+  if (settingsPanel.style.display === "none") openSettingsPanel();
+  else closeSettingsPanel();
+});
+document.getElementById("settingsClose").addEventListener("click", closeSettingsPanel);
+
+const restoreFileInput = document.getElementById("restoreFileInput");
+document.getElementById("restoreBtn").addEventListener("click", () => {
+  restoreFileInput.click();
+});
+restoreFileInput.addEventListener("change", async () => {
+  const file = restoreFileInput.files[0];
+  if (!file) return;
+  if (!confirm("현재 저장된 읽음 진행률/설정을 백업 파일 내용으로 덮어씁니다. 계속할까요?")) {
+    restoreFileInput.value = "";
+    return;
+  }
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const res = await fetch("/api/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("restore failed");
+    alert("복원이 완료되었습니다.");
+    await load();
+    await renderLibraryLists();
+  } catch (e) {
+    alert("복원에 실패했습니다. 올바른 백업 파일인지 확인해주세요.");
+  } finally {
+    restoreFileInput.value = "";
   }
 });
 

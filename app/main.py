@@ -7,6 +7,7 @@ import datetime
 import io
 import asyncio
 import logging
+import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
@@ -196,6 +197,37 @@ def set_setting(key: str, value: str):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# 등록된 라이브러리(=/library 바로 아래 폴더 중 실제로 스캔할 폴더) 관리
+# 등록 해제는 이 목록에서 이름만 빼는 것이라, 실제 폴더/zip 파일은 절대 건드리지 않는다.
+# ---------------------------------------------------------------------------
+
+REGISTERED_LIBRARIES_KEY = "registered_libraries"
+
+
+def get_registered_libraries():
+    """등록된 라이브러리 이름 집합을 반환. 한 번도 설정된 적 없으면 None."""
+    raw = get_setting(REGISTERED_LIBRARIES_KEY)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
+def set_registered_libraries(names):
+    set_setting(REGISTERED_LIBRARIES_KEY, json.dumps(sorted(names), ensure_ascii=False))
+
+
+def list_library_dirs():
+    """LIBRARY_ROOT 바로 아래에 실제로 존재하는 폴더 이름 목록."""
+    if not os.path.isdir(LIBRARY_ROOT):
+        return []
+    return sorted(d for d in os.listdir(LIBRARY_ROOT) if os.path.isdir(os.path.join(LIBRARY_ROOT, d)))
+
+
 # 회차의 page_index로 이 값이 저장되어 있으면 "그 회차까지 다 읽었다"는 뜻.
 # /continue 조회 시 이 값을 만나면 실제 페이지 수와 비교해 다음 화로 자동 이동시킨다.
 PAGE_FINISHED_SENTINEL = 1_000_000
@@ -225,10 +257,19 @@ def scan_library():
     if not os.path.isdir(LIBRARY_ROOT):
         return series_map, chapters_map
 
-    for platform in sorted(os.listdir(LIBRARY_ROOT)):
-        platform_path = os.path.join(LIBRARY_ROOT, platform)
-        if not os.path.isdir(platform_path):
+    all_dirs = list_library_dirs()
+
+    registered = get_registered_libraries()
+    if registered is None:
+        # 처음 실행(설정이 아예 없음): 지금 있는 폴더 전부를 등록된 것으로 간주해서
+        # 기존 사용자가 업데이트해도 라이브러리가 갑자기 비지 않게 한다.
+        registered = set(all_dirs)
+        set_registered_libraries(registered)
+
+    for platform in all_dirs:
+        if platform not in registered:
             continue
+        platform_path = os.path.join(LIBRARY_ROOT, platform)
 
         for series_name in sorted(os.listdir(platform_path)):
             series_path = os.path.join(platform_path, series_name)
@@ -319,6 +360,60 @@ def rescan():
     added, removed = _diff_and_apply_scan(s, c)
     log.info(f"수동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
     return {"series_count": len(s)}
+
+
+# ---------------------------------------------------------------------------
+# 라이브러리(=/library 바로 아래 폴더) 등록/해제
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/libraries")
+def list_libraries():
+    """LIBRARY_ROOT 바로 아래의 폴더들을 등록/미등록으로 나눠서 보여준다."""
+    all_dirs = list_library_dirs()
+    registered = get_registered_libraries()
+    if registered is None:
+        registered = set(all_dirs)
+        set_registered_libraries(registered)
+    return {
+        "registered": [d for d in all_dirs if d in registered],
+        "available": [d for d in all_dirs if d not in registered],
+    }
+
+
+@app.post("/api/libraries/{name}/register")
+def register_library(name: str):
+    if not os.path.isdir(LIBRARY_ROOT):
+        raise HTTPException(404, "라이브러리 루트가 없습니다")
+    if not os.path.isdir(os.path.join(LIBRARY_ROOT, name)):
+        raise HTTPException(404, f"'{name}' 폴더가 존재하지 않습니다")
+
+    registered = get_registered_libraries() or set()
+    registered.add(name)
+    set_registered_libraries(registered)
+
+    s, c = scan_library()
+    _catalog["series"] = s
+    _catalog["chapters"] = c
+    log.info(f"라이브러리 등록: {name} (시리즈 {len(s)}개로 갱신됨)")
+    return {"ok": True, "registered": sorted(registered)}
+
+
+@app.delete("/api/libraries/{name}")
+def unregister_library(name: str):
+    """등록 목록에서만 제외한다. 실제 폴더/zip 파일은 절대 삭제하지 않는다."""
+    registered = get_registered_libraries() or set()
+    if name not in registered:
+        raise HTTPException(404, "등록되지 않은 라이브러리입니다")
+
+    registered.discard(name)
+    set_registered_libraries(registered)
+
+    s, c = scan_library()
+    _catalog["series"] = s
+    _catalog["chapters"] = c
+    log.info(f"라이브러리 등록 해제: {name} (파일은 삭제하지 않음, 시리즈 {len(s)}개로 갱신됨)")
+    return {"ok": True, "registered": sorted(registered)}
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +615,107 @@ class SettingIn(BaseModel):
 def write_setting(key: str, body: SettingIn):
     set_setting(key, body.value)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 백업 / 복원 (읽음 진행률 + 검색/정렬/필터 설정 + 라이브러리 등록 상태 전부)
+# ---------------------------------------------------------------------------
+
+BACKUP_VERSION = 1
+
+
+@app.get("/api/backup")
+def export_backup():
+    conn = _db()
+    try:
+        progress_rows = conn.execute(
+            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at FROM progress"
+        ).fetchall()
+        settings_rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+    finally:
+        conn.close()
+
+    payload = {
+        "version": BACKUP_VERSION,
+        "exported_at": datetime.datetime.utcnow().isoformat(),
+        "progress": [
+            {
+                "series_id": r[0],
+                "chapter_id": r[1],
+                "chapter_index": r[2],
+                "page_index": r[3],
+                "updated_at": r[4],
+            }
+            for r in progress_rows
+        ],
+        "app_settings": [{"key": r[0], "value": r[1]} for r in settings_rows],
+    }
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    filename = f"webtoon-server-backup-{datetime.date.today().isoformat()}.json"
+    log.info(f"백업 생성 - progress {len(payload['progress'])}건, settings {len(payload['app_settings'])}건")
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class RestorePayload(BaseModel):
+    version: int | None = None
+    progress: list = []
+    app_settings: list = []
+
+
+@app.post("/api/restore")
+def import_backup(body: RestorePayload):
+    conn = _db()
+    try:
+        conn.execute("DELETE FROM progress")
+        conn.execute("DELETE FROM app_settings")
+
+        progress_count = 0
+        for p in body.progress:
+            series_id = p.get("series_id")
+            chapter_id = p.get("chapter_id")
+            if not series_id or not chapter_id:
+                continue
+            conn.execute(
+                """
+                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    series_id,
+                    chapter_id,
+                    int(p.get("chapter_index", 0)),
+                    int(p.get("page_index", 0)),
+                    p.get("updated_at") or datetime.datetime.utcnow().isoformat(),
+                ),
+            )
+            progress_count += 1
+
+        settings_count = 0
+        for s in body.app_settings:
+            key = s.get("key")
+            if not key:
+                continue
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?)",
+                (key, s.get("value", "")),
+            )
+            settings_count += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 라이브러리 등록 상태도 복원됐을 수 있으니 다시 스캔해서 반영
+    s, c = scan_library()
+    _catalog["series"] = s
+    _catalog["chapters"] = c
+
+    log.info(f"백업 복원 완료 - progress {progress_count}건, settings {settings_count}건")
+    return {"ok": True, "progress_count": progress_count, "settings_count": settings_count}
 
 
 @app.get("/api/series/{series_id}/chapters")
