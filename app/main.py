@@ -85,6 +85,14 @@ def _db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -140,6 +148,35 @@ def delete_progress(series_id: str):
     conn = _db()
     try:
         conn.execute("DELETE FROM progress WHERE series_id = ?", (series_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 기기 상관없이 동일하게 유지되어야 하는 앱 설정 (서버에 저장)
+# ---------------------------------------------------------------------------
+
+
+def get_setting(key: str, default=None):
+    conn = _db()
+    try:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else default
+
+
+def set_setting(key: str, value: str):
+    conn = _db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -354,6 +391,26 @@ def set_read_state(series_id: str, body: ReadStateIn):
         raise HTTPException(400, "scope must be 'all' or 'chapter'")
 
     apply_read_boundary(series_id, chapters, target_index)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 앱 설정 (검색/정렬/필터 등 기기 간 동일하게 유지할 값 저장)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/settings/{key}")
+def read_setting(key: str):
+    return {"key": key, "value": get_setting(key)}
+
+
+class SettingIn(BaseModel):
+    value: str
+
+
+@app.put("/api/settings/{key}")
+def write_setting(key: str, body: SettingIn):
+    set_setting(key, body.value)
     return {"ok": True}
 
 

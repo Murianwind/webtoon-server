@@ -88,6 +88,39 @@ a {
   flex-shrink: 0;
 }
 
+/* ---------- 상태 필터 탭 (index.html) ---------- */
+
+.filter-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px 0;
+  max-width: 1100px;
+  margin: 0 auto;
+  overflow-x: auto;
+}
+
+.filter-tab {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filter-tab:hover {
+  border-color: var(--accent);
+}
+
+.filter-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a1a12;
+  font-weight: 600;
+}
+
 /* ---------- 읽음/안읽음 처리 패널 (index.html) ---------- */
 
 .read-action-panel {
