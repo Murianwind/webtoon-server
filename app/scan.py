@@ -93,16 +93,21 @@ def parse_chapter_label(stem: str, series_name: str = "") -> tuple[int, str]:
 
     # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록).
     # 폴더명과 파일명의 구두점 표기가 달라도(예: "：" vs 공백) 매칭되도록 느슨하게 비교.
+    # 시리즈명이 여러 번 반복될 수도 있으니(예: "나이트런 나이트런 신세계 ...")
+    # 더 이상 안 잘릴 때까지 반복해서 제거
     content = rest
-    prefix_length = _series_prefix_length(rest, series_name)
-    if prefix_length:
-        content = rest[prefix_length:]
+    while True:
+        prefix_length = _series_prefix_length(content, series_name)
+        if not prefix_length:
+            break
+        content = content[prefix_length:]
 
     # "화" 앞에 "제"가 붙는 표기("제16화")는 "제"를 회차 번호의 일부로 취급해서
     # 부제 프리픽스에 안 남게 함
-    marker_match = re.search(r"(?:제\s*)?(\d+\s*화)", content)
+    marker_match = re.search(r"(?:제\s*)?(\d+)\s*화", content)
     if marker_match:
-        marker = marker_match.group(1).replace(" ", "")
+        # 앞자리 0은 떼고 표시 (예: "030화" -> "30화")
+        marker = f"{int(marker_match.group(1))}화"
         # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
         prefix = _clean_title(content[: marker_match.start()], strip_trailing_hash=False)
         suffix = _clean_title(content[marker_match.end():])
