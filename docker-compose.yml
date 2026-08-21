@@ -8,8 +8,8 @@ services:
       # hermes 알림 스크립트가 만드는 바로가기가 이 주소 기준으로 생성됩니다.
       # Komga가 쓰던 외부 도메인을 그대로 재사용하는 경우 아래처럼 두면 됩니다.
       - "PUBLIC_BASE_URL=https://komga.murian.ddnsfree.com"
-      # 라이브러리 자동 재스캔 주기(초). 기본 300(5분). 0으로 두면 자동 재스캔을 끔.
-      - "RESCAN_INTERVAL_SECONDS=300"
+      # 라이브러리 자동 재스캔 주기(초). 기본 7200(2시간). 0으로 두면 자동 재스캔을 끔.
+      - "RESCAN_INTERVAL_SECONDS=7200"
     volumes:
       # 왼쪽(호스트 경로)을 실제 PC 폴더로 맞춰주세요.
       # 오른쪽(/library/<플랫폼명>)은 코드가 "플랫폼 폴더"로 인식하는 이름입니다.

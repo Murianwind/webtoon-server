@@ -6,12 +6,16 @@ import sqlite3
 import datetime
 import io
 import asyncio
+import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from PIL import Image
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("webtoon-server")
 
 # 라이브러리 루트: 이 폴더 바로 아래 1depth = 플랫폼(naver/kakao 등),
 # 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차
@@ -24,8 +28,8 @@ DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
 # 예: https://komga.murian.ddnsfree.com (Komga가 쓰던 도메인을 그대로 재사용)
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
-# 라이브러리 자동 재스캔 주기(초). 0 이하로 설정하면 자동 재스캔을 끈다.
-RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "300"))
+# 라이브러리 자동 재스캔 주기(초). 기본 2시간. 0 이하로 설정하면 자동 재스캔을 끈다.
+RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "7200"))
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 IMAGE_MEDIA_TYPES = {
@@ -273,8 +277,25 @@ async def startup_scan():
     s, c = scan_library()
     _catalog["series"] = s
     _catalog["chapters"] = c
+    log.info(f"라이브러리 스캔 완료 - 시리즈 {len(s)}개, 회차 {len(c)}개 (경로: {LIBRARY_ROOT})")
+
     if RESCAN_INTERVAL_SECONDS > 0:
+        minutes = RESCAN_INTERVAL_SECONDS / 60
+        log.info(f"자동 재스캔 활성화 - {minutes:.0f}분마다 실행")
         asyncio.create_task(_auto_rescan_loop())
+    else:
+        log.info("자동 재스캔 비활성화됨 (RESCAN_INTERVAL_SECONDS <= 0)")
+
+
+def _diff_and_apply_scan(s: dict, c: dict) -> tuple[int, int]:
+    """새 스캔 결과를 카탈로그에 반영하고, (신규 시리즈 수, 제거된 시리즈 수)를 반환."""
+    prev_ids = set(_catalog["series"].keys())
+    new_ids = set(s.keys())
+    added = len(new_ids - prev_ids)
+    removed = len(prev_ids - new_ids)
+    _catalog["series"] = s
+    _catalog["chapters"] = c
+    return added, removed
 
 
 async def _auto_rescan_loop():
@@ -282,18 +303,21 @@ async def _auto_rescan_loop():
         await asyncio.sleep(RESCAN_INTERVAL_SECONDS)
         try:
             s, c = scan_library()
-            _catalog["series"] = s
-            _catalog["chapters"] = c
+            added, removed = _diff_and_apply_scan(s, c)
+            if added or removed:
+                log.info(f"자동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
+            else:
+                log.info(f"자동 재스캔 완료 - 변경 없음 (시리즈 {len(s)}개, 회차 {len(c)}개)")
         except Exception:
             # 한 번 실패해도 다음 주기에 다시 시도 - 서버가 죽으면 안 됨
-            pass
+            log.exception("자동 재스캔 중 오류 발생 - 다음 주기에 재시도")
 
 
 @app.post("/api/rescan")
 def rescan():
     s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
+    added, removed = _diff_and_apply_scan(s, c)
+    log.info(f"수동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
     return {"series_count": len(s)}
 
 
@@ -333,8 +357,9 @@ def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=78, optimize=True)
         return buf.getvalue(), "image/jpeg"
-    except Exception:
+    except Exception as e:
         # 변환에 실패해도(손상/미지원 포맷 등) 최소한 원본이라도 보여준다
+        log.warning(f"커버 이미지 변환 실패, 원본으로 대체 - {zip_path}::{image_name} ({e})")
         ext = os.path.splitext(image_name)[1].lower()
         return raw, IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream")
 
