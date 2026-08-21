@@ -263,30 +263,82 @@ function appendEndCard() {
 function renderSidebar() {
   const ordered = seriesData.chapters; // 오름차순 그대로: 최신화가 맨 아래로
   sidebarListEl.innerHTML = "";
-  for (const ch of ordered) {
+  ordered.forEach((ch, idx) => {
     const row = document.createElement("div");
     row.className = "sidebar-row";
     row.dataset.chapterId = ch.id;
-    row.textContent = ch.label;
-    row.addEventListener("click", () => {
-      const loaded = loadedChapters.find((c) => c.id === ch.id);
-      if (loaded) {
-        const target = document.querySelector(`img[data-chapter="${ch.id}"][data-page="0"]`);
-        if (target) target.scrollIntoView({ block: "start" });
-        closeSidebar();
-      } else {
-        location.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(ch.id)}&page=0`;
-      }
-    });
+    row.dataset.idx = String(idx);
+    row.innerHTML = `
+      <span class="sidebar-row-label">${ch.label}</span>
+      <span class="sidebar-row-status"></span>
+    `;
+    row.addEventListener("click", () => jumpToChapter(ch));
     sidebarListEl.appendChild(row);
-  }
+  });
   highlightSidebar();
 }
 
 function highlightSidebar() {
+  // currentChapterId 기준으로 이전 회차는 "읽음", 그 회차는 "읽는 중"으로 표시.
+  // 스크롤로 자연스럽게 진행 중이든, 사이드바에서 직접 건너뛰었든 동일한 기준.
+  const readIndex = chapterIndexById(currentChapterId);
   for (const row of sidebarListEl.querySelectorAll(".sidebar-row")) {
+    const idx = parseInt(row.dataset.idx, 10);
     row.classList.toggle("active", row.dataset.chapterId === currentChapterId);
+
+    const statusEl = row.querySelector(".sidebar-row-status");
+    if (readIndex < 0) {
+      statusEl.textContent = "";
+      statusEl.className = "sidebar-row-status";
+    } else if (idx < readIndex) {
+      statusEl.textContent = "읽음";
+      statusEl.className = "sidebar-row-status read";
+    } else if (idx === readIndex) {
+      statusEl.textContent = "읽는 중";
+      statusEl.className = "sidebar-row-status reading";
+    } else {
+      statusEl.textContent = "";
+      statusEl.className = "sidebar-row-status";
+    }
   }
+}
+
+function updateUrlState(chapterId, page) {
+  const p = new URLSearchParams(location.search);
+  p.set("series", seriesId);
+  p.set("chapter", chapterId);
+  p.set("page", String(page));
+  history.replaceState(null, "", `${location.pathname}?${p.toString()}`);
+}
+
+async function jumpToChapter(ch) {
+  // 새로고침(페이지 이동) 없이 그 회차로 이동. 이전 회차는 읽음, 이 회차는 읽는 중,
+  // 이후 회차는 안읽음으로 사이드바에 즉시 반영되고, 서버에도 같은 방식으로 저장됨.
+  currentChapterId = ch.id;
+  currentPageIndex = 0;
+  chapterTitleEl.textContent = `${seriesData.title} · ${ch.label}`;
+  highlightSidebar();
+  scheduleSaveProgress();
+  updateUrlState(ch.id, 0);
+  closeSidebar();
+
+  const alreadyLoaded = loadedChapters.some((c) => c.id === ch.id);
+  if (alreadyLoaded) {
+    const target = document.querySelector(`img[data-chapter="${ch.id}"][data-page="0"]`);
+    if (target) target.scrollIntoView({ block: "start" });
+    return;
+  }
+
+  // 아직 로드 안 된(이전/이후 상관없이) 회차 -> 새로고침 대신 이 회차부터 다시 구성
+  pageObserver.disconnect();
+  loadMoreObserver.disconnect();
+  visiblePages.clear();
+  pagesEl.innerHTML = "";
+  loadedChapters = [];
+  isLoadingNext = false;
+
+  beginPositioning();
+  await appendChapter(ch, { scrollToPage: 0 });
 }
 
 function openSidebar() {
