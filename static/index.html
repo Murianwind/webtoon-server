@@ -29,12 +29,12 @@
 </div>
 <div id="filterTabs" class="filter-tabs"></div>
 
-<div id="settingsPanel" class="read-action-panel" style="display:none">
-  <div class="read-action-header">
+<aside id="settingsPanel" class="sidebar">
+  <div class="sidebar-header">
     <span>시리즈 폴더 / 백업</span>
-    <button id="settingsClose" class="read-action-close" aria-label="닫기">×</button>
+    <button id="settingsClose" class="sidebar-close" aria-label="닫기">×</button>
   </div>
-  <div id="settingsBody">
+  <div id="settingsBody" class="settings-panel-body">
     <div class="settings-section">
       <div class="settings-section-title">스캔 중인 시리즈 폴더</div>
       <div id="includedFolderList" class="lib-list"></div>
@@ -55,7 +55,8 @@
       <input id="restoreFileInput" type="file" accept="application/json" style="display:none">
     </div>
   </div>
-</div>
+</aside>
+<div id="settingsOverlay" class="sidebar-overlay"></div>
 
 <div id="readActionPanel" class="read-action-panel" style="display:none">
   <div class="read-action-header">
@@ -473,18 +474,22 @@ async function renderFolderLists() {
 }
 
 function openSettingsPanel() {
-  settingsPanel.style.display = "block";
+  settingsPanel.classList.add("open");
+  settingsOverlay.classList.add("open");
   renderFolderLists();
 }
 function closeSettingsPanel() {
-  settingsPanel.style.display = "none";
+  settingsPanel.classList.remove("open");
+  settingsOverlay.classList.remove("open");
 }
 
+const settingsOverlay = document.getElementById("settingsOverlay");
 document.getElementById("settingsBtn").addEventListener("click", () => {
-  if (settingsPanel.style.display === "none") openSettingsPanel();
-  else closeSettingsPanel();
+  if (settingsPanel.classList.contains("open")) closeSettingsPanel();
+  else openSettingsPanel();
 });
 document.getElementById("settingsClose").addEventListener("click", closeSettingsPanel);
+settingsOverlay.addEventListener("click", closeSettingsPanel);
 
 const restoreFileInput = document.getElementById("restoreFileInput");
 document.getElementById("restoreBtn").addEventListener("click", () => {

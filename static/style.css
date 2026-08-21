@@ -56,7 +56,6 @@ a {
 }
 
 .rescan-btn {
-  margin-left: auto;
   flex-shrink: 0;
   width: 32px;
   height: 32px;
@@ -67,6 +66,9 @@ a {
   font-size: 17px;
   line-height: 1;
   cursor: pointer;
+}
+#settingsBtn.rescan-btn {
+  margin-left: auto;
 }
 .rescan-btn:hover {
   background: rgba(255, 255, 255, 0.16);
@@ -263,7 +265,13 @@ a {
   color: var(--text-dim);
 }
 
-/* ---------- 설정 패널: 라이브러리 관리 / 백업 (index.html) ---------- */
+/* ---------- 설정 패널: 라이브러리 관리 / 백업 (index.html, 사이드바 형태) ---------- */
+
+.settings-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
 
 .settings-section {
   padding: 4px 0 14px;
