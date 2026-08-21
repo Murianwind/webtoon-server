@@ -30,9 +30,7 @@ const seriesId = params.get("series");
 const initialChapterId = params.get("chapter");
 const initialPage = parseInt(params.get("page") || "0", 10) || 0;
 
-document.getElementById("backLink").href = seriesId
-  ? `/series.html?id=${encodeURIComponent(seriesId)}`
-  : "/";
+document.getElementById("backLink").href = "/";
 
 let seriesData = null;       // { title, platform, chapters: [...] } (오름차순)
 let loadedChapters = [];     // 이 화면에 이미 붙인 회차들 (진행 순서대로)
@@ -185,9 +183,9 @@ function appendEndCard() {
   const el = document.createElement("div");
   el.className = "next-chapter";
   el.innerHTML = `
-    <a class="next-card" href="/series.html?id=${encodeURIComponent(seriesId)}">
+    <a class="next-card" href="/">
       <span class="eyebrow">마지막 화입니다</span>
-      <span class="next-title">회차 목록으로 →</span>
+      <span class="next-title">웹툰 목록으로 →</span>
     </a>
   `;
   pagesEl.appendChild(el);
@@ -198,7 +196,7 @@ function appendEndCard() {
 // ---------------------------------------------------------------------
 
 function renderSidebar() {
-  const ordered = [...seriesData.chapters].reverse(); // 최신화가 위로
+  const ordered = seriesData.chapters; // 오름차순 그대로: 최신화가 맨 아래로
   sidebarListEl.innerHTML = "";
   for (const ch of ordered) {
     const row = document.createElement("div");

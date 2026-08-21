@@ -88,6 +88,95 @@ a {
   flex-shrink: 0;
 }
 
+/* ---------- 읽음/안읽음 처리 패널 (index.html) ---------- */
+
+.read-action-panel {
+  max-width: 1100px;
+  margin: 10px auto 0;
+  padding: 0 16px;
+}
+
+.read-action-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.read-action-close {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.read-action-close:hover {
+  color: var(--text);
+}
+
+#readActionBody {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  padding: 12px 14px;
+}
+
+.read-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.read-action-grid button,
+.read-action-picker-buttons button {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.read-action-grid button:hover,
+.read-action-picker-buttons button:hover {
+  border-color: var(--accent);
+}
+
+.read-action-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.read-action-picker select {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.read-action-picker-buttons {
+  display: flex;
+  gap: 8px;
+}
+.read-action-picker-buttons button {
+  flex: 1;
+}
+.read-action-picker-buttons button.ghost {
+  background: transparent;
+  color: var(--text-dim);
+}
+
 /* ---------- 시리즈 그리드 (index.html) ---------- */
 
 .grid {
@@ -157,22 +246,33 @@ a {
   justify-content: center;
 }
 
-.card .list-icon {
+.card.selected .cover-wrap {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.card .select-toggle {
   position: absolute;
   bottom: 6px;
   right: 6px;
   width: 24px;
   height: 24px;
-  border-radius: 6px;
+  border-radius: 999px;
+  border: none;
   background: rgba(0, 0, 0, 0.55);
   color: var(--text);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 12px;
+  cursor: pointer;
 }
-.card .list-icon:hover {
+.card .select-toggle:hover {
   background: rgba(0, 0, 0, 0.8);
+}
+.card.selected .select-toggle {
+  background: var(--accent);
+  color: #0a1a12;
 }
 
 .card .title {
@@ -195,110 +295,6 @@ a {
   padding: 60px 20px;
   text-align: center;
   color: var(--text-dim);
-}
-
-/* ---------- 시리즈 상세 (series.html) ---------- */
-
-.series-header {
-  padding: 20px 16px 8px;
-  max-width: 700px;
-  margin: 0 auto;
-}
-
-.series-header h2 {
-  margin: 0 0 4px;
-  font-size: 20px;
-}
-
-.series-header .sub {
-  color: var(--text-dim);
-  font-size: 13px;
-}
-
-/* ---------- 전체 읽음/안읽음 버튼 ---------- */
-
-.mark-all-row {
-  display: flex;
-  gap: 8px;
-  max-width: 700px;
-  margin: 0 auto;
-  padding: 4px 16px 8px;
-}
-
-.mark-all-btn {
-  flex: 1;
-  padding: 9px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.mark-all-btn:hover {
-  border-color: var(--accent);
-}
-
-.mark-all-btn.ghost {
-  background: transparent;
-  color: var(--text-dim);
-}
-
-/* ---------- 회차 목록 ---------- */
-
-.chapter-list {
-  max-width: 700px;
-  margin: 0 auto;
-  padding: 8px 16px 60px;
-}
-
-.chapter-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 4px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-}
-
-.chapter-row:hover {
-  background: var(--bg-elevated);
-}
-
-.chapter-row .label {
-  flex: 1;
-  font-size: 15px;
-}
-
-.chapter-row.is-read .label {
-  color: var(--text-dim);
-}
-
-.chapter-row .arrow {
-  color: var(--text-dim);
-}
-
-.read-toggle {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.read-toggle.read {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(41, 209, 127, 0.1);
 }
 
 /* ---------- 리더 (reader.html) ---------- */

@@ -18,24 +18,40 @@
     <option value="title">제목순</option>
   </select>
 </div>
+
+<div id="readActionPanel" class="read-action-panel" style="display:none">
+  <div class="read-action-header">
+    <span id="readActionTitle"></span>
+    <button id="readActionClose" class="read-action-close" aria-label="닫기">×</button>
+  </div>
+  <div id="readActionBody"></div>
+</div>
+
 <main id="grid" class="grid"></main>
 
 <script>
 const PLATFORM_LABEL = { naver: "네이버", kakao: "카카오" };
+const LS_QUERY = "webtoon:index:query";
+const LS_SORT = "webtoon:index:sort";
 
 let allSeries = [];
-let query = "";
-let sortMode = "latest";
+let query = localStorage.getItem(LS_QUERY) || "";
+let sortMode = localStorage.getItem(LS_SORT) || "latest";
+
+let selectedSeriesId = null;
+let selectedSeriesTitle = null;
+let actionMode = null; // null | "chapter-read" | "chapter-unread"
+
+const searchInput = document.getElementById("searchInput");
+const sortSelect = document.getElementById("sortSelect");
+searchInput.value = query;
+sortSelect.value = sortMode;
 
 function sortSeries(list) {
   const arr = [...list];
-  if (sortMode === "latest") {
-    arr.sort((a, b) => b.latest_update - a.latest_update);
-  } else if (sortMode === "unread") {
-    arr.sort((a, b) => b.unread_count - a.unread_count);
-  } else if (sortMode === "title") {
-    arr.sort((a, b) => a.title.localeCompare(b.title, "ko"));
-  }
+  if (sortMode === "latest") arr.sort((a, b) => b.latest_update - a.latest_update);
+  else if (sortMode === "unread") arr.sort((a, b) => b.unread_count - a.unread_count);
+  else if (sortMode === "title") arr.sort((a, b) => a.title.localeCompare(b.title, "ko"));
   return arr;
 }
 
@@ -52,18 +68,31 @@ function render() {
 
   grid.innerHTML = "";
   for (const s of list) {
+    const isSelected = s.id === selectedSeriesId;
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
       <div class="cover-wrap">
         <span class="platform-tag">${PLATFORM_LABEL[s.platform] || s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
-        <a class="list-icon" href="/series.html?id=${encodeURIComponent(s.id)}" title="회차 목록" onclick="event.stopPropagation()">≡</a>
+        <button class="select-toggle" title="읽음 상태 관리" aria-label="읽음 상태 관리">${isSelected ? "●" : "○"}</button>
       </div>
       <div class="title">${s.title}</div>
       <div class="chapter-count">${s.chapter_count}화</div>
     `;
+    card.querySelector(".select-toggle").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (selectedSeriesId === s.id) {
+        deselectSeries();
+      } else {
+        selectedSeriesId = s.id;
+        selectedSeriesTitle = s.title;
+        actionMode = null;
+        renderActionPanel();
+      }
+      render();
+    });
     card.addEventListener("click", () => goContinue(s.id));
     grid.appendChild(card);
   }
@@ -76,9 +105,106 @@ async function goContinue(seriesId) {
     const data = await res.json();
     location.href = `/reader.html?series=${encodeURIComponent(seriesId)}&chapter=${encodeURIComponent(data.chapter_id)}&page=${data.page_index}`;
   } catch (e) {
-    location.href = `/series.html?id=${encodeURIComponent(seriesId)}`;
+    // 이동 실패 시 아무것도 하지 않음 (콘솔에만 남김)
+    console.error(e);
   }
 }
+
+// ---------------------------------------------------------------------
+// 읽음/안읽음 처리 패널
+// ---------------------------------------------------------------------
+
+function deselectSeries() {
+  selectedSeriesId = null;
+  selectedSeriesTitle = null;
+  actionMode = null;
+  renderActionPanel();
+}
+
+function renderActionPanel() {
+  const panel = document.getElementById("readActionPanel");
+  if (!selectedSeriesId) {
+    panel.style.display = "none";
+    return;
+  }
+  panel.style.display = "block";
+  document.getElementById("readActionTitle").textContent = selectedSeriesTitle;
+  const body = document.getElementById("readActionBody");
+
+  if (!actionMode) {
+    body.innerHTML = `
+      <div class="read-action-grid">
+        <button data-act="all-read">전체 읽음으로 표시</button>
+        <button data-act="all-unread">전체 읽지 않음으로 표시</button>
+        <button data-act="chapter-read">회차 읽음으로 표시</button>
+        <button data-act="chapter-unread">회차 읽지 않음으로 표시</button>
+      </div>
+    `;
+    for (const btn of body.querySelectorAll("button[data-act]")) {
+      btn.addEventListener("click", () => onActionButton(btn.dataset.act));
+    }
+  } else {
+    body.innerHTML = `
+      <div class="read-action-picker">
+        <select id="chapterPickerSelect"><option>회차 불러오는 중...</option></select>
+        <div class="read-action-picker-buttons">
+          <button id="chapterPickerCancel" class="ghost">뒤로</button>
+          <button id="chapterPickerApply">적용</button>
+        </div>
+      </div>
+    `;
+    loadChapterOptions();
+    document.getElementById("chapterPickerCancel").addEventListener("click", () => {
+      actionMode = null;
+      renderActionPanel();
+    });
+    document.getElementById("chapterPickerApply").addEventListener("click", applyChapterAction);
+  }
+}
+
+async function loadChapterOptions() {
+  const res = await fetch(`/api/series/${encodeURIComponent(selectedSeriesId)}/chapters`);
+  const data = await res.json();
+  const select = document.getElementById("chapterPickerSelect");
+  if (!select) return; // 그 사이 패널이 닫혔을 수 있음
+  select.innerHTML = data.chapters
+    .map((c) => `<option value="${c.id}">${c.label}${c.read ? " (읽음)" : ""}</option>`)
+    .join("");
+}
+
+async function putReadState(body) {
+  await fetch(`/api/series/${encodeURIComponent(selectedSeriesId)}/read-state`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function onActionButton(act) {
+  if (act === "all-read" || act === "all-unread") {
+    await putReadState({ scope: "all", read: act === "all-read" });
+    deselectSeries();
+    await load();
+  } else {
+    actionMode = act;
+    renderActionPanel();
+  }
+}
+
+async function applyChapterAction() {
+  const select = document.getElementById("chapterPickerSelect");
+  if (!select || !select.value) return;
+  const read = actionMode === "chapter-read";
+  await putReadState({ scope: "chapter", chapter_id: select.value, read });
+  deselectSeries();
+  await load();
+}
+
+document.getElementById("readActionClose").addEventListener("click", deselectSeries);
+
+// ---------------------------------------------------------------------
+// 로딩 & 검색/정렬 (localStorage에 유지)
+// ---------------------------------------------------------------------
 
 async function load() {
   const grid = document.getElementById("grid");
@@ -92,12 +218,14 @@ async function load() {
   render();
 }
 
-document.getElementById("searchInput").addEventListener("input", (e) => {
+searchInput.addEventListener("input", (e) => {
   query = e.target.value;
+  localStorage.setItem(LS_QUERY, query);
   render();
 });
-document.getElementById("sortSelect").addEventListener("change", (e) => {
+sortSelect.addEventListener("change", (e) => {
   sortMode = e.target.value;
+  localStorage.setItem(LS_SORT, sortMode);
   render();
 });
 
