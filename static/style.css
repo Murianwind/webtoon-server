@@ -621,6 +621,31 @@ a {
   color: var(--accent);
 }
 
+.overlap-reveal-btn {
+  display: block;
+  margin: 6px auto;
+  width: 44px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(41, 209, 127, 0.45);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.overlap-reveal-btn:hover {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--text);
+}
+.overlap-reveal-btn:disabled {
+  display: none;
+}
+
 /* ---------- 사이드 회차 패널 (reader.html) ---------- */
 
 .sidebar {

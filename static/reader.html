@@ -162,6 +162,10 @@ async function prefetchNextChapter(afterChapterId) {
   if (!next || prefetchedChapterIds.has(next.id)) return;
   prefetchedChapterIds.add(next.id);
 
+  // 겹침 계산은 서버에서 시간이 걸릴 수 있으니(첫 계산 시), 실제로 필요해지기 전에
+  // 미리 요청만 던져서 캐싱해둔다 (결과는 여기서 안 기다림)
+  fetch(`/api/chapters/${encodeURIComponent(next.id)}/overlap`).catch(() => {});
+
   try {
     const res = await fetch(`/api/chapters/${encodeURIComponent(next.id)}/pages`);
     const data = await res.json();
@@ -176,17 +180,44 @@ async function prefetchNextChapter(afterChapterId) {
   }
 }
 
-async function appendChapter(chapter, { scrollToPage = null } = {}) {
+async function revealSkippedPages(chapter, skipCount, btnEl) {
+  btnEl.disabled = true;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < skipCount; i++) {
+    const img = document.createElement("img");
+    img.dataset.chapter = chapter.id;
+    img.dataset.page = String(i);
+    img.dataset.key = `${chapter.id}:${i}`;
+    img.src = `/api/chapters/${encodeURIComponent(chapter.id)}/pages/${i}`;
+    img.alt = `${i + 1}페이지`;
+    pageObserver.observe(img);
+    frag.appendChild(img);
+  }
+  btnEl.replaceWith(frag);
+}
+
+async function appendChapter(chapter, { scrollToPage = null, skipPages = 0 } = {}) {
   loadMoreObserver.disconnect();
 
   const res = await fetch(`/api/chapters/${encodeURIComponent(chapter.id)}/pages`);
   const data = await res.json();
   const pageCount = data.page_count || 0;
+  const startPage = Math.min(skipPages, Math.max(pageCount - 1, 0));
+
+  if (startPage > 0) {
+    const revealBtn = document.createElement("button");
+    revealBtn.className = "overlap-reveal-btn";
+    revealBtn.title = "이전 화와 겹치는 페이지 펼쳐보기";
+    revealBtn.setAttribute("aria-label", "건너뛴 페이지 펼쳐보기");
+    revealBtn.textContent = "⋯";
+    revealBtn.addEventListener("click", () => revealSkippedPages(chapter, startPage, revealBtn));
+    pagesEl.appendChild(revealBtn);
+  }
 
   let targetImg = null;
   let lastImg = null;
   let firstImg = null;
-  for (let i = 0; i < pageCount; i++) {
+  for (let i = startPage; i < pageCount; i++) {
     const img = document.createElement("img");
     img.dataset.chapter = chapter.id;
     img.dataset.page = String(i);
@@ -196,7 +227,7 @@ async function appendChapter(chapter, { scrollToPage = null } = {}) {
     pagesEl.appendChild(img);
     pageObserver.observe(img);
     lastImg = img;
-    if (i === 0) firstImg = img;
+    if (i === startPage) firstImg = img;
     if (scrollToPage !== null && i === scrollToPage) targetImg = img;
   }
 
@@ -238,7 +269,17 @@ async function loadNextChapter() {
   if (!next) return;
   isLoadingNext = true;
   try {
-    await appendChapter(next);
+    let skipPages = 0;
+    try {
+      const res = await fetch(`/api/chapters/${encodeURIComponent(next.id)}/overlap`);
+      if (res.ok) {
+        const overlapData = await res.json();
+        skipPages = overlapData.skip_pages || 0;
+      }
+    } catch (e) {
+      // 겹침 조회 실패해도 그냥 처음부터 보여주면 됨
+    }
+    await appendChapter(next, { skipPages });
   } finally {
     isLoadingNext = false;
   }
