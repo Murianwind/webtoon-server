@@ -621,26 +621,32 @@ a {
   color: var(--accent);
 }
 
+.overlap-reveal-wrap {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 10px;
+  box-sizing: border-box;
+}
+
 .overlap-reveal-btn {
-  display: block;
-  margin: 6px auto;
-  width: 44px;
-  height: 22px;
+  width: 34px;
+  height: 34px;
   border-radius: 999px;
-  border: 1.5px solid rgba(41, 209, 127, 0.45);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-dim);
-  font-size: 12px;
+  border: 1.5px solid var(--accent);
+  background: rgba(10, 11, 13, 0.82); /* 웹툰 배경이 흰색이든 검은색이든 항상 대비되도록 자체 배경 */
+  color: #fff;
+  font-size: 14px;
   line-height: 1;
   letter-spacing: 1px;
   cursor: pointer;
-  opacity: 0.55;
-  transition: opacity 0.15s ease, border-color 0.15s ease;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
 .overlap-reveal-btn:hover {
   opacity: 1;
-  border-color: var(--accent);
-  color: var(--text);
+  transform: scale(1.08);
 }
 .overlap-reveal-btn:disabled {
   display: none;
