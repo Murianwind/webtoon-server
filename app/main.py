@@ -14,6 +14,8 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from PIL import Image
+import numpy as np
+import cv2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webtoon-server")
@@ -156,6 +158,16 @@ def _db():
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chapter_overlap (
+            next_chapter_id TEXT PRIMARY KEY,
+            prev_chapter_id TEXT NOT NULL,
+            skip_pages INTEGER NOT NULL,
+            computed_at TEXT NOT NULL
         )
         """
     )
@@ -380,6 +392,7 @@ async def startup_scan():
     _catalog["series"] = s
     _catalog["chapters"] = c
     log.info(f"라이브러리 스캔 완료 - 시리즈 {len(s)}개, 회차 {len(c)}개 (경로: {LIBRARY_ROOT})")
+    asyncio.create_task(precompute_overlaps())
 
     if RESCAN_INTERVAL_SECONDS > 0:
         minutes = RESCAN_INTERVAL_SECONDS / 60
@@ -410,16 +423,18 @@ async def _auto_rescan_loop():
                 log.info(f"자동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
             else:
                 log.info(f"자동 재스캔 완료 - 변경 없음 (시리즈 {len(s)}개, 회차 {len(c)}개)")
+            asyncio.create_task(precompute_overlaps())
         except Exception:
             # 한 번 실패해도 다음 주기에 다시 시도 - 서버가 죽으면 안 됨
             log.exception("자동 재스캔 중 오류 발생 - 다음 주기에 재시도")
 
 
 @app.post("/api/rescan")
-def rescan():
+async def rescan():
     s, c = scan_library()
     added, removed = _diff_and_apply_scan(s, c)
     log.info(f"수동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
+    asyncio.create_task(precompute_overlaps())
     return {"series_count": len(s)}
 
 
@@ -485,6 +500,146 @@ def _list_images(zip_path: str):
         ]
     names.sort(key=natural_key)
     return names
+
+
+# ---------------------------------------------------------------------------
+# 화 전환 시 중복(리캡) 페이지 감지 — 다음 화 맨 앞부분이 이전 화 끝부분과
+# 픽셀 단위로 겹치는지 이미지 매칭으로 확인하고, 겹치는 만큼 건너뛸 수 있게 함.
+# ---------------------------------------------------------------------------
+
+OVERLAP_THRESHOLD = 0.9  # 이 이상이면 "같은 페이지"로 판단 (실측: 진짜 겹침 0.99+, 무관한 페이지 0.3~0.55)
+OVERLAP_MAX_CHECK = 10  # 다음 화 맨 앞에서 최대 몇 장까지 검사할지
+OVERLAP_TAIL_PAGES = 15  # 이전 화 끝에서 몇 장을 검색 대상으로 삼을지
+
+
+def _stitch_gray_vertical(zip_path: str, image_names: list):
+    """zip 안의 이미지 여러 장을 세로로 이어붙여 흑백 numpy 배열로 반환."""
+    if not image_names:
+        return None
+    imgs = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for name in image_names:
+            raw = zf.read(name)
+            imgs.append(Image.open(io.BytesIO(raw)).convert("L"))
+    width = imgs[0].width
+    total_height = sum(im.height for im in imgs)
+    canvas = Image.new("L", (width, total_height))
+    y = 0
+    for im in imgs:
+        if im.width != width:
+            im = im.resize((width, max(1, round(im.height * width / im.width))))
+        canvas.paste(im, (0, y))
+        y += im.height
+    return np.array(canvas)
+
+
+def compute_overlap_pages(prev_zip_path: str, next_zip_path: str) -> int:
+    """다음 화 zip 맨 앞부터 몇 장이 이전 화 zip 끝부분과 겹치는지 계산."""
+    try:
+        prev_names = _list_images(prev_zip_path)
+        next_names = _list_images(next_zip_path)
+        if not prev_names or not next_names:
+            return 0
+
+        search = _stitch_gray_vertical(prev_zip_path, prev_names[-OVERLAP_TAIL_PAGES:])
+        if search is None:
+            return 0
+
+        count = 0
+        with zipfile.ZipFile(next_zip_path) as zf:
+            for name in next_names[:OVERLAP_MAX_CHECK]:
+                raw = zf.read(name)
+                template = np.array(Image.open(io.BytesIO(raw)).convert("L"))
+                if template.shape[0] > search.shape[0] or template.shape[1] != search.shape[1]:
+                    break
+                result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val >= OVERLAP_THRESHOLD:
+                    count += 1
+                else:
+                    break
+
+        # 회차 전체가 겹친다고 나오면 뭔가 잘못된 것 - 안전하게 최소 1장은 남김
+        if count >= len(next_names):
+            count = len(next_names) - 1
+        return max(count, 0)
+    except Exception as e:
+        log.warning(f"회차 간 겹침 감지 실패, 건너뛰지 않음: {e}")
+        return 0
+
+
+def get_cached_overlap(next_chapter_id: str):
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT skip_pages FROM chapter_overlap WHERE next_chapter_id = ?",
+            (next_chapter_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def set_cached_overlap(next_chapter_id: str, prev_chapter_id: str, skip_pages: int):
+    conn = _db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO chapter_overlap (next_chapter_id, prev_chapter_id, skip_pages, computed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(next_chapter_id) DO UPDATE SET
+                prev_chapter_id = excluded.prev_chapter_id,
+                skip_pages = excluded.skip_pages,
+                computed_at = excluded.computed_at
+            """,
+            (next_chapter_id, prev_chapter_id, skip_pages, datetime.datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_precompute_lock = asyncio.Lock()
+
+
+async def precompute_overlaps():
+    """
+    재스캔 직후 호출되는 백그라운드 작업. 아직 계산된 적 없는 화 전환(연속된 두 회차)만
+    골라서 겹침을 미리 계산해 캐싱해둔다. 요청 처리를 막지 않도록 각 계산은 스레드로 돌리고,
+    이미 실행 중이면 중복 실행하지 않는다.
+    """
+    if _precompute_lock.locked():
+        return
+    async with _precompute_lock:
+        pending = []
+        for s in _catalog["series"].values():
+            chapters = s["chapters"]
+            for i in range(1, len(chapters)):
+                next_id = chapters[i]["id"]
+                if get_cached_overlap(next_id) is None:
+                    pending.append((chapters[i - 1], chapters[i]))
+
+        if not pending:
+            return
+
+        log.info(f"화 전환 겹침 사전 계산 시작 - {len(pending)}건")
+        computed = 0
+        skipped_found = 0
+        for prev_ch, next_ch in pending:
+            try:
+                skip_pages = await asyncio.to_thread(
+                    compute_overlap_pages, prev_ch["path"], next_ch["path"]
+                )
+                set_cached_overlap(next_ch["id"], prev_ch["id"], skip_pages)
+                computed += 1
+                if skip_pages > 0:
+                    skipped_found += 1
+            except Exception:
+                log.exception(f"겹침 사전 계산 실패 (건너뛰고 계속): {next_ch['id']}")
+        log.info(
+            f"화 전환 겹침 사전 계산 완료 - {computed}/{len(pending)}건 처리, "
+            f"그중 겹침 발견 {skipped_found}건"
+        )
 
 
 # 썸네일(시리즈 커버)은 원본을 그대로 주지 않고 리사이즈+압축해서 캐싱한다.
@@ -841,6 +996,38 @@ def chapter_pages(chapter_id: str):
         raise HTTPException(404, "chapter not found")
     names = _list_images(zip_path)
     return {"page_count": len(names)}
+
+
+@app.get("/api/chapters/{chapter_id}/overlap")
+def chapter_overlap(chapter_id: str):
+    """
+    이 회차 맨 앞부분이 바로 이전 회차(같은 시리즈, 정렬상 직전) 끝부분과 겹치는
+    페이지 수를 반환. 결과는 DB에 캐싱되어 다음부터는 즉시 응답한다.
+    """
+    zip_path = _catalog["chapters"].get(chapter_id)
+    if not zip_path:
+        raise HTTPException(404, "chapter not found")
+
+    prev_chapter = None
+    for s in _catalog["series"].values():
+        idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == chapter_id), None)
+        if idx is not None:
+            if idx > 0:
+                prev_chapter = s["chapters"][idx - 1]
+            break
+
+    if not prev_chapter:
+        return {"skip_pages": 0}
+
+    cached = get_cached_overlap(chapter_id)
+    if cached is not None:
+        return {"skip_pages": cached}
+
+    skip_pages = compute_overlap_pages(prev_chapter["path"], zip_path)
+    set_cached_overlap(chapter_id, prev_chapter["id"], skip_pages)
+    if skip_pages > 0:
+        log.info(f"화 전환 겹침 감지: {chapter_id} 앞부분 {skip_pages}페이지가 이전 화와 중복 (자동 건너뜀)")
+    return {"skip_pages": skip_pages}
 
 
 @app.get("/api/chapters/{chapter_id}/pages/{page_index}")
