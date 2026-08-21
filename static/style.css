@@ -33,7 +33,7 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 14px;
   background: rgba(20, 22, 26, 0.92);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--border);
@@ -395,6 +395,8 @@ a {
 }
 
 .card .cover-wrap img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -459,6 +461,26 @@ a {
   color: #0a1a12;
 }
 
+.card .chapter-list-toggle {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+}
+.card .chapter-list-toggle:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
 .card .title {
   font-size: 13px;
   line-height: 1.3;
@@ -496,7 +518,7 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
   background: linear-gradient(rgba(0,0,0,0.85), rgba(0,0,0,0));
   transition: opacity 0.2s ease;
 }
@@ -624,7 +646,7 @@ a {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top)) 16px 16px;
   border-bottom: 1px solid var(--border);
   font-size: 15px;
 }
