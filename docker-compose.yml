@@ -24,6 +24,7 @@ services:
     ports:
       - "8000:8000"                                     # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
     environment:
+      - "TZ=Asia/Seoul"                                  # 로그/재스캔 시각을 한국 시간 기준으로
       - "PUBLIC_BASE_URL="                               # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
       - "RESCAN_INTERVAL_SECONDS=7200"                   # <-- 여기 수정(선택): 자동 재스캔 주기(초)
     volumes:
