@@ -40,41 +40,53 @@ LIBRARY_ROOT (컨테이너 내부 /library)
 ## 설치
 
 이 저장소는 push할 때마다 GitHub Actions가 이미지를 빌드해서 GHCR에 공개로 올려둡니다.
-**fork도 clone도 필요 없이, [`docker-compose.yml`](./docker-compose.yml) 하나만 있으면 됩니다.**
-Portainer가 있든 없든, CLI로 직접 `docker compose`를 쓰는 환경이든 동일하게 씁니다.
+**fork도 clone도 필요 없습니다.** 아래 내용을 그대로 복사해서, 표시된 줄만 실제 값으로
+고친 뒤 Portainer의 **Web editor**에 붙여넣거나 `docker-compose.yml`로 저장해서 CLI에서
+`docker compose up -d`로 실행하면 됩니다. 별도로 `.env`나 Portainer의 Environment
+variables를 채울 필요가 없습니다 — 이 파일 자체가 곧 스택입니다.
 
-1. `docker-compose.yml` 파일을 받아옵니다 (다운로드하거나 저장소를 clone)
-2. 필요한 값을 채웁니다. 최소한 이 두 개는 필요합니다:
-   - `LIBRARY_NAVER_PATH` — 실제 웹툰 폴더 경로 (예: `D:/Webtoons/naver`)
-   - `LIBRARY_KAKAO_PATH` — 실제 웹툰 폴더 경로
-   - 폴더가 naver/kakao 두 개가 아니라면 아래 "웹툰 폴더 여러 개 추가하기"를 먼저 보고
-     `docker-compose.yml`의 volumes를 원하는 대로 고친 뒤 진행하세요.
-   - CLI라면 같은 폴더에 `.env` 파일을 만들어 값을 채우고, Portainer라면 스택의
-     **Environment variables**에 같은 값을 입력하면 됩니다.
-3. 실행합니다:
-   - **CLI**: `docker-compose.yml`이 있는 폴더에서 `docker compose up -d`
-   - **Portainer**: Stacks → Add stack → Web editor에 파일 내용을 그대로 붙여넣거나,
-     Repository 방식으로 이 저장소를 그대로 지정 → Deploy the stack
-4. `http://localhost:8000` (또는 지정한 `HOST_PORT`) 접속
+```yaml
+services:
+  webtoon-server:
+    image: ghcr.io/murianwind/webtoon-server:latest
+    container_name: webtoon-server
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "8000:8000"                                    # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
+    environment:
+      - "PUBLIC_BASE_URL="                              # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
+      - "RESCAN_INTERVAL_SECONDS=7200"                  # <-- 여기 수정(선택): 자동 재스캔 주기(초)
+    volumes:
+      - "/path/to/your/naver-webtoons:/library/naver"   # <-- 여기 수정: 실제 웹툰 폴더 경로
+      - "/path/to/your/kakao-webtoons:/library/kakao"   # <-- 여기 수정: 실제 웹툰 폴더 경로
+      - "webtoon_data:/data"
+    restart: unless-stopped
 
-CLI로 `.env`를 쓰신다면 절대 커밋하지 마세요 (`.gitignore`에 포함되어 있습니다). 개인
-경로/도메인이 여기 들어갑니다.
+volumes:
+  webtoon_data:
+```
+
+폴더가 naver/kakao 두 개가 아니라면, 붙여넣기 전에 아래 "웹툰 폴더 여러 개 추가하기"를
+먼저 보고 `volumes`를 원하는 대로 고치세요.
+
+배포 후 `http://localhost:8000` (또는 위에서 바꾼 포트) 접속.
 
 ### 자동 업데이트
 
-`docker-compose.yml`의 `webtoon-server` 서비스에 이미
-`com.centurylinklabs.watchtower.enable=true` 라벨이 붙어 있습니다. **이미 Watchtower를
-쓰고 계시면** `--label-enable` 옵션만 켜져 있으면 별다른 설정 없이 자동으로 인식되어,
-새 이미지가 올라올 때마다 알아서 pull하고 재시작합니다. Watchtower가 없다면 이 라벨은
-그냥 무시되니 지울 필요 없고, 필요할 때 수동으로 `docker compose pull && docker compose up -d`
-(또는 Portainer의 "Pull and redeploy")만 눌러주면 됩니다.
+위 `labels`에 있는 `com.centurylinklabs.watchtower.enable=true`는 Watchtower용 표시입니다.
+**이미 Watchtower를 쓰고 계시면** `--label-enable` 옵션만 켜져 있으면 별다른 설정 없이
+자동으로 인식되어, 새 이미지가 올라올 때마다 알아서 pull하고 재시작합니다. Watchtower가
+없다면 이 라벨은 그냥 무시되니 지울 필요 없고, 필요할 때 수동으로
+`docker compose pull && docker compose up -d` (또는 Portainer의 "Pull and redeploy")만
+눌러주면 됩니다.
 
-### 기존에 build 방식으로 이미 배포해두셨다면
+### 기존에 다른 방식으로 이미 배포해두셨다면
 
-Repository 방식으로 이 저장소를 이미 연결해두셨다면, 저장소를 다시 pull해서
-`docker-compose.yml`을 갱신한 뒤 Portainer에서 **Pull and redeploy**만 누르면 됩니다.
-컨테이너 이름이 동일해서 자동으로 새 정의(이미지 기반)로 교체됩니다. 예전에 로컬에서
-빌드됐던 이미지는 더 이상 안 쓰이니, Portainer의 Images 메뉴에서 나중에 한 번
+Repository 연결이나 로컬 빌드 방식으로 이미 스택을 만들어두셨다면, 그 스택을 지우고
+위 내용으로 Web editor 방식의 새 스택을 만드는 걸 권장합니다. 컨테이너 이름이
+동일(`webtoon-server`)해서 기존 컨테이너는 새로 만든 스택이 대체합니다. 예전에 쓰던
+이미지는 더 이상 필요 없으니, Portainer의 Images 메뉴에서 나중에 한 번
 정리(prune)해주면 깔끔합니다.
 
 ## 웹툰 폴더 여러 개 추가하기
@@ -91,7 +103,7 @@ compose를 건드릴 필요 없이 재스캔만 되면 자동 반영됩니다.
 
 ```yaml
     volumes:
-      - "${LIBRARY_ROOT_PATH}:/library"
+      - "D:/Webtoons:/library"
       - "webtoon_data:/data"
 ```
 
@@ -102,24 +114,21 @@ compose를 건드릴 필요 없이 재스캔만 되면 자동 반영됩니다.
 
 ```yaml
     volumes:
-      - "${LIBRARY_NAVER_PATH}:/library/naver"
-      - "${LIBRARY_KAKAO_PATH}:/library/kakao"
-      - "${LIBRARY_LEZHIN_PATH}:/library/레진"       # 원하는 만큼 추가
-      - "${LIBRARY_MYSTUFF_PATH}:/library/무엇이든"   # 이름도 자유
+      - "/path/to/naver-webtoons:/library/naver"
+      - "/path/to/kakao-webtoons:/library/kakao"
+      - "/path/to/lezhin-webtoons:/library/레진"       # 원하는 만큼 추가
+      - "/path/to/other-webtoons:/library/무엇이든"     # 이름도 자유
       - "webtoon_data:/data"
 ```
 
-이렇게 줄을 추가했다면, Portainer의 **Environment variables**에도 그 변수명
-(`LIBRARY_LEZHIN_PATH` 등)을 새로 추가해서 실제 경로를 넣어주면 됩니다.
+## 환경변수 (compose 파일에서 직접 수정)
 
-## 환경변수
-
-| 변수 | 필수 | 설명 |
+| 항목 | 위치 | 설명 |
 |---|---|---|
-| `LIBRARY_NAVER_PATH` 등 | 예 | 호스트의 실제 웹툰 폴더 경로. volumes에 적어둔 만큼 필요 |
-| `HOST_PORT` | 아니오 (기본 8000) | 컨테이너를 노출할 호스트 포트 |
-| `PUBLIC_BASE_URL` | 아니오 | 외부 알림 스크립트 등에서 바로가기 링크를 만들 때 쓰는 기준 주소. 비워두면 링크 생성을 생략 |
-| `RESCAN_INTERVAL_SECONDS` | 아니오 (기본 7200) | 자동 재스캔 주기(초). 0 이하면 자동 재스캔 비활성화 |
+| 웹툰 폴더 경로 | `volumes`의 왼쪽 경로 | 호스트의 실제 웹툰 폴더. 필요한 만큼 줄 추가 가능 |
+| 포트 | `ports`의 왼쪽 숫자 | 컨테이너를 노출할 호스트 포트 (기본 8000) |
+| `PUBLIC_BASE_URL` | `environment` | 외부 알림 스크립트 등에서 바로가기 링크를 만들 때 쓰는 기준 주소. 비워두면 링크 생성을 생략 |
+| `RESCAN_INTERVAL_SECONDS` | `environment` | 자동 재스캔 주기(초), 기본 7200(2시간). 0 이하면 자동 재스캔 비활성화 |
 
 수동 재스캔은 `POST /api/rescan` 또는 목록 화면 우측 상단 새로고침 버튼으로 가능합니다.
 

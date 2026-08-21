@@ -1,16 +1,15 @@
-# GitHub Actions가 push할 때마다 미리 빌드해서 GHCR에 올려주는 이미지를 pull해서 씁니다.
-# 로컬 빌드가 필요 없어서, CLI에서 `docker compose up -d`로 바로 실행하거나
-# Portainer의 "Web editor"에 그대로 붙여넣어도 됩니다 (repository 연결/clone/fork 필요 없음).
+# 이 파일을 그대로 복사해서 Portainer의 "Web editor"에 붙여넣거나, 같은 내용을
+# docker-compose.yml로 저장해서 CLI에서 `docker compose up -d`로 실행하세요.
 #
-# 자동 업데이트: 아래 webtoon-server의 labels에 있는
-# com.centurylinklabs.watchtower.enable=true 는 Watchtower용 표시입니다.
-# 이미 Watchtower를 쓰고 계시면 --label-enable 옵션이 켜져 있는 한 자동으로 인식되어
-# 새 이미지가 올라올 때마다 갱신됩니다. Watchtower가 없다면 이 라벨은 그냥 무시되니
+# 아래에서 "# <-- 여기 수정" 표시가 붙은 줄만 실제 값으로 고치면 바로 씁니다.
+# 별도로 .env 파일이나 Portainer의 Environment variables를 채울 필요가 없습니다.
+#
+# 자동 업데이트: webtoon-server의 labels에 있는
+# com.centurylinklabs.watchtower.enable=true 는 Watchtower용 표시입니다. 이미
+# Watchtower를 쓰고 계시면 --label-enable 옵션이 켜져 있는 한 자동으로 인식되어 새
+# 이미지가 올라올 때마다 갱신됩니다. Watchtower가 없다면 이 라벨은 그냥 무시되니
 # 지우지 않아도 되고, 필요할 때 Watchtower(https://containrrr.dev/watchtower/)를
 # 따로 띄우기만 하면 됩니다.
-#
-# 이 저장소를 fork해서 자신의 코드로 쓰고 싶다면 image의 OWNER 부분을 자신의
-# GitHub 계정명으로 바꿔주세요. 그냥 그대로 쓰기만 할 거라면 안 바꿔도 됩니다.
 
 services:
   webtoon-server:
@@ -19,15 +18,15 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
-      - "${HOST_PORT:-8000}:8000"
+      - "8000:8000"                                    # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
     environment:
-      - "PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}"
-      - "RESCAN_INTERVAL_SECONDS=${RESCAN_INTERVAL_SECONDS:-7200}"
+      - "PUBLIC_BASE_URL="                              # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
+      - "RESCAN_INTERVAL_SECONDS=7200"                  # <-- 여기 수정(선택): 자동 재스캔 주기(초)
     volumes:
       # 플랫폼 폴더는 원하는 만큼 자유롭게 추가/삭제 가능합니다. 자세한 설명은
       # README의 "웹툰 폴더 여러 개 추가하기" 섹션을 참고하세요.
-      - "${LIBRARY_NAVER_PATH}:/library/naver"
-      - "${LIBRARY_KAKAO_PATH}:/library/kakao"
+      - "/path/to/your/naver-webtoons:/library/naver"   # <-- 여기 수정: 실제 웹툰 폴더 경로
+      - "/path/to/your/kakao-webtoons:/library/kakao"   # <-- 여기 수정: 실제 웹툰 폴더 경로
       - "webtoon_data:/data"
     restart: unless-stopped
 
