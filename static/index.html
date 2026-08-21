@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>내 웹툰</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="웹툰">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -32,7 +39,6 @@
 <main id="grid" class="grid"></main>
 
 <script>
-const PLATFORM_LABEL = { naver: "네이버", kakao: "카카오" };
 const LS_QUERY = "webtoon:index:query";
 const LS_SORT = "webtoon:index:sort";
 const FILTER_KEY = "status_filter"; // 서버(app_settings)에 저장 -> 모든 기기에서 동일하게 적용
@@ -138,7 +144,7 @@ function render() {
     card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${PLATFORM_LABEL[s.platform] || s.platform}</span>
+        <span class="platform-tag">${s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
         <button class="select-toggle" title="읽음 상태 관리용 선택" aria-label="읽음 상태 관리용 선택">${isSelected ? "●" : "○"}</button>
