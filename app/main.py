@@ -439,7 +439,7 @@ def _list_images(zip_path: str):
 # 썸네일(시리즈 커버)은 원본을 그대로 주지 않고 리사이즈+압축해서 캐싱한다.
 # 웹툰 첫 페이지는 세로로 아주 긴 원본 이미지(수 MB)인 경우가 흔해서,
 # 그대로 내려주면 모바일에서 목록 화면이 매우 느려지고 무거워진다.
-COVER_MAX_WIDTH = 400
+COVER_MAX_WIDTH = 320
 _cover_cache = {}  # series_id -> (source_mtime, jpeg_bytes)
 
 
