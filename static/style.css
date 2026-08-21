@@ -401,12 +401,14 @@ a {
   height: 100%;
   object-fit: cover;
   display: block;
+  z-index: 0;
 }
 
 .card .platform-tag {
   position: absolute;
   top: 6px;
   left: 6px;
+  z-index: 1;
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 999px;
@@ -419,6 +421,7 @@ a {
   position: absolute;
   top: 6px;
   right: 6px;
+  z-index: 1;
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
@@ -441,6 +444,7 @@ a {
   position: absolute;
   bottom: 6px;
   right: 6px;
+  z-index: 1;
   width: 24px;
   height: 24px;
   border-radius: 999px;
@@ -465,6 +469,7 @@ a {
   position: absolute;
   bottom: 6px;
   left: 6px;
+  z-index: 1;
   width: 24px;
   height: 24px;
   border-radius: 6px;
