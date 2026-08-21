@@ -60,6 +60,15 @@ def init_schema() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS read_chapters (
+                series_id TEXT NOT NULL,
+                chapter_id TEXT NOT NULL,
+                PRIMARY KEY (series_id, chapter_id)
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -134,6 +143,53 @@ def apply_read_boundary(series_id: str, chapters: list, boundary_index: int) -> 
     boundary_index = min(boundary_index, len(chapters) - 1)
     chapter = chapters[boundary_index]
     set_progress(series_id, chapter["id"], boundary_index, PAGE_FINISHED_SENTINEL)
+
+
+# ---------------------------------------------------------------------------
+# 회차별 명시적 읽음 기록
+#
+# "몇 번째까지 읽었다"는 인덱스 하나로 뭉뚱그리면, 나중에 빠졌던 회차가 사이사이에
+# 채워질 때 "그 시점의 경계선보다 앞이니 이미 읽은 것"이라고 잘못 취급해버리는 문제가
+# 있다 (실제로는 한 번도 안 본 회차인데도). 그래서 회차 하나하나를 chapter_id로
+# 명시적으로 기록해서, 나중에 순서가 바뀌거나 사이에 새 회차가 끼어들어도 그 회차
+# 자체의 읽음 여부는 흔들리지 않게 한다.
+# ---------------------------------------------------------------------------
+
+
+def get_read_chapter_ids(series_id: str) -> set[str]:
+    with db_connection() as conn:
+        rows = conn.execute(
+            "SELECT chapter_id FROM read_chapters WHERE series_id = ?", (series_id,)
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def mark_chapters_read(series_id: str, chapter_ids: list[str]) -> None:
+    if not chapter_ids:
+        return
+    with db_connection() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO read_chapters (series_id, chapter_id) VALUES (?, ?)",
+            [(series_id, chapter_id) for chapter_id in chapter_ids],
+        )
+        conn.commit()
+
+
+def mark_chapters_unread(series_id: str, chapter_ids: list[str]) -> None:
+    if not chapter_ids:
+        return
+    with db_connection() as conn:
+        conn.executemany(
+            "DELETE FROM read_chapters WHERE series_id = ? AND chapter_id = ?",
+            [(series_id, chapter_id) for chapter_id in chapter_ids],
+        )
+        conn.commit()
+
+
+def clear_all_read_chapters(series_id: str) -> None:
+    with db_connection() as conn:
+        conn.execute("DELETE FROM read_chapters WHERE series_id = ?", (series_id,))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +279,7 @@ def export_backup_data() -> dict:
             "SELECT series_id, chapter_id, chapter_index, page_index, updated_at FROM progress"
         ).fetchall()
         settings_rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+        read_rows = conn.execute("SELECT series_id, chapter_id FROM read_chapters").fetchall()
     return {
         "progress": [
             {
@@ -235,17 +292,21 @@ def export_backup_data() -> dict:
             for row in progress_rows
         ],
         "app_settings": [{"key": row[0], "value": row[1]} for row in settings_rows],
+        "read_chapters": [{"series_id": row[0], "chapter_id": row[1]} for row in read_rows],
     }
 
 
-def import_backup_data(progress_rows: list, settings_rows: list) -> tuple[int, int]:
-    """기존 progress/app_settings를 전부 지우고 주어진 내용으로 교체.
-    반환값은 (저장된 progress 건수, 저장된 settings 건수)."""
+def import_backup_data(progress_rows: list, settings_rows: list, read_chapter_rows: list | None = None) -> tuple[int, int, int]:
+    """기존 progress/app_settings/read_chapters를 전부 지우고 주어진 내용으로 교체.
+    반환값은 (저장된 progress 건수, 저장된 settings 건수, 저장된 read_chapters 건수)."""
+    read_chapter_rows = read_chapter_rows or []
     progress_count = 0
     settings_count = 0
+    read_count = 0
     with db_connection() as conn:
         conn.execute("DELETE FROM progress")
         conn.execute("DELETE FROM app_settings")
+        conn.execute("DELETE FROM read_chapters")
 
         for row in progress_rows:
             series_id = row.get("series_id")
@@ -277,5 +338,16 @@ def import_backup_data(progress_rows: list, settings_rows: list) -> tuple[int, i
             )
             settings_count += 1
 
+        for row in read_chapter_rows:
+            series_id = row.get("series_id")
+            chapter_id = row.get("chapter_id")
+            if not series_id or not chapter_id:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO read_chapters (series_id, chapter_id) VALUES (?, ?)",
+                (series_id, chapter_id),
+            )
+            read_count += 1
+
         conn.commit()
-    return progress_count, settings_count
+    return progress_count, settings_count, read_count

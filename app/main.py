@@ -33,7 +33,7 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 # 라이브러리 자동 재스캔 주기(초). 기본 2시간. 0 이하로 설정하면 자동 재스캔을 끈다.
 RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "7200"))
 
-BACKUP_VERSION = 1
+BACKUP_VERSION = 2  # v2부터 read_chapters(회차별 명시 읽음 기록) 포함
 
 app = FastAPI(title="webtoon-server")
 
@@ -41,6 +41,41 @@ app = FastAPI(title="webtoon-server")
 def _chapter_number_part(label: str) -> str:
     """라벨에서 제목 부분(' · ' 뒤)을 떼고 회차 번호 부분만 반환."""
     return label.split(" · ", 1)[0]
+
+
+def _resolve_read_index(chapters: list, prog: dict | None) -> int:
+    """
+    저장된 진행률(prog)의 chapter_id가 "지금" 스캔 결과에서 몇 번째 위치인지 다시 찾는다.
+    (레거시 마이그레이션과 "현재 읽는 중" 위치 판단에만 쓰인다 - 읽음/안읽음 자체는 이제
+    회차별 명시 기록(read_chapters)으로 판단하므로 인덱스 밀림 문제에서 자유롭다.)
+    """
+    if not prog:
+        return -1
+    for i, chapter in enumerate(chapters):
+        if chapter["id"] == prog["chapter_id"]:
+            return i
+    return -1  # 저장된 회차가 더 이상 없으면(파일 삭제 등) 진행 없음으로 취급
+
+
+def _migrate_legacy_progress_if_needed(series_id: str, chapters: list, prog: dict | None) -> None:
+    """
+    예전 버전은 "몇 번째 회차까지 읽었다"는 단일 커서(chapter_index)만 저장했다. 그 방식은
+    나중에 빠졌던 회차가 사이사이에 채워지면, 그 순간의 커서보다 앞이라는 이유만으로 실제로는
+    한 번도 안 본 회차까지 "이미 읽음"으로 잘못 취급해버리는 문제가 있었다. 그래서 회차별로
+    명시적으로 기록하는 방식(read_chapters)으로 바꿨는데, 기존에 이미 진행률이 쌓여있던
+    사용자의 데이터가 갑자기 전부 안읽음으로 보이면 안 되니, 최초 1회만 예전 커서를 기준으로
+    read_chapters를 채워 넣어 자연스럽게 이어지게 한다.
+    """
+    if not prog or db.get_read_chapter_ids(series_id):
+        return  # 진행률이 없거나 이미 새 방식으로 기록된 적 있으면 할 필요 없음
+    idx = _resolve_read_index(chapters, prog)
+    if idx < 0:
+        return
+    if prog["page_index"] >= db.PAGE_FINISHED_SENTINEL:
+        ids_to_mark = [chapter["id"] for chapter in chapters[: idx + 1]]
+    else:
+        ids_to_mark = [chapter["id"] for chapter in chapters[:idx]]
+    db.mark_chapters_read(series_id, ids_to_mark)
 
 
 def _log_scan_result(prefix: str, series_map: dict, chapters_map: dict, added: int | None = None, removed: int | None = None) -> None:
@@ -154,23 +189,24 @@ def include_series_folder(body: SeriesFolderRef):
 
 @app.get("/api/series")
 def list_series():
-    all_progress = db.get_all_progress()
     result = []
     for series in catalog.get_series_map().values():
-        total = len(series["chapters"])
-        prog = all_progress.get(series["id"])
-        # 진행률 기록이 없으면 전부 안읽음, 있으면 마지막으로 본 회차 이후를 안읽음으로 취급
-        unread = total if not prog else max(total - prog["chapter_index"] - 1, 0)
+        chapters = series["chapters"]
+        total = len(chapters)
+        prog = db.get_progress(series["id"])
+        _migrate_legacy_progress_if_needed(series["id"], chapters, prog)
+        read_ids = db.get_read_chapter_ids(series["id"])
+        unread = sum(1 for chapter in chapters if chapter["id"] not in read_ids)
 
         if total == 0:
             progress_display = ""
         elif unread == 0:
             progress_display = "완독"
         else:
-            # 다음에 읽어야 할(또는 읽는 중인) 회차 번호 / 마지막 회차 번호
-            next_idx = max(0, min(total - unread, total - 1))
-            current_label = _chapter_number_part(series["chapters"][next_idx]["label"])
-            last_label = _chapter_number_part(series["chapters"][-1]["label"])
+            # 아직 안 읽은 회차 중 가장 앞선 것(중간에 빠졌던 회차일 수도 있음) / 마지막 회차
+            next_unread = next(chapter for chapter in chapters if chapter["id"] not in read_ids)
+            current_label = _chapter_number_part(next_unread["label"])
+            last_label = _chapter_number_part(chapters[-1]["label"])
             progress_display = f"{current_label}/{last_label}"
 
         result.append(
@@ -253,9 +289,13 @@ def save_progress(series_id: str, body: ProgressIn):
     series = catalog.get_series(series_id)
     if not series:
         raise HTTPException(404, "series not found")
-    idx = next((i for i, ch in enumerate(series["chapters"]) if ch["id"] == body.chapter_id), None)
+    chapters = series["chapters"]
+    idx = next((i for i, ch in enumerate(chapters) if ch["id"] == body.chapter_id), None)
     if idx is None:
         raise HTTPException(404, "chapter not found in series")
+    # 스크롤로 여기까지 왔다는 건 이 앞 회차는 다 지나왔다는 뜻이니 명시적으로 읽음 기록
+    # (지금 보고 있는 회차 자체는 "읽는 중"이지 "읽음"이 아니므로 제외)
+    db.mark_chapters_read(series_id, [ch["id"] for ch in chapters[:idx]])
     db.set_progress(series_id, body.chapter_id, idx, max(body.page_index, 0))
     return {"ok": True}
 
@@ -276,7 +316,13 @@ def set_read_state(series_id: str, body: ReadStateIn):
         raise HTTPException(404, "no chapters")
 
     if body.scope == "all":
-        target_index = len(chapters) - 1 if body.read else -1
+        if body.read:
+            db.mark_chapters_read(series_id, [ch["id"] for ch in chapters])
+            last = chapters[-1]
+            db.set_progress(series_id, last["id"], len(chapters) - 1, db.PAGE_FINISHED_SENTINEL)
+        else:
+            db.clear_all_read_chapters(series_id)
+            db.delete_progress(series_id)
     elif body.scope == "chapter":
         if not body.chapter_id:
             raise HTTPException(400, "chapter_id is required for scope=chapter")
@@ -285,20 +331,28 @@ def set_read_state(series_id: str, body: ReadStateIn):
             raise HTTPException(404, "chapter not found in series")
 
         prog = db.get_progress(series_id)
-        current_index = prog["chapter_index"] if prog else -1
+        current_index = _resolve_read_index(chapters, prog)
 
         if body.read:
-            # 선택한 회차 "이전(및 선택한 회차 자체)"은 모두 읽음 처리.
-            # 이미 그보다 더 뒤까지 읽은 상태라면 뒤로 되돌리지 않음.
-            target_index = max(current_index, idx)
+            # 선택한 회차 "이전(및 선택한 회차 자체)"을 전부 읽음으로 명시 기록.
+            # 다른 회차의 읽음 여부는 안 건드리므로, 이미 더 뒤까지 읽었어도 그대로 유지됨.
+            db.mark_chapters_read(series_id, [ch["id"] for ch in chapters[: idx + 1]])
+            # "현재 읽는 중" 위치는 이미 그보다 더 뒤에 있었다면 되돌리지 않음
+            if idx >= current_index:
+                db.set_progress(series_id, chapters[idx]["id"], idx, db.PAGE_FINISHED_SENTINEL)
         else:
-            # 선택한 회차 "부터(포함)" 안읽음 처리 (선택한 회차 자체도 안읽음이 됨).
-            # 이미 그보다 앞까지만 읽은 상태라면 앞으로 당기지 않음.
-            target_index = min(current_index, idx - 1)
+            # 선택한 회차 "부터(포함)"를 읽음 기록에서 제거 (선택한 회차 자체도 안읽음이 됨)
+            db.mark_chapters_unread(series_id, [ch["id"] for ch in chapters[idx:]])
+            # "현재 읽는 중" 위치가 방금 안읽음 처리한 구간 안에 있었다면 그 앞으로 당김
+            if current_index >= idx:
+                if idx == 0:
+                    db.delete_progress(series_id)
+                else:
+                    prev_chapter = chapters[idx - 1]
+                    db.set_progress(series_id, prev_chapter["id"], idx - 1, db.PAGE_FINISHED_SENTINEL)
     else:
         raise HTTPException(400, "scope must be 'all' or 'chapter'")
 
-    db.apply_read_boundary(series_id, chapters, target_index)
     return {"ok": True}
 
 
@@ -307,19 +361,18 @@ def list_chapters(series_id: str):
     series = catalog.get_series(series_id)
     if not series:
         raise HTTPException(404, "series not found")
+    chapters = series["chapters"]
     prog = db.get_progress(series_id)
-    read_index = prog["chapter_index"] if prog else -1
-    page_index = prog["page_index"] if prog else 0
+    _migrate_legacy_progress_if_needed(series_id, chapters, prog)
+    read_ids = db.get_read_chapter_ids(series_id)
+    current_chapter_id = prog["chapter_id"] if prog else None
 
     chapters_out = []
-    for i, chapter in enumerate(series["chapters"]):
-        if i < read_index or (i == read_index and page_index >= db.PAGE_FINISHED_SENTINEL):
-            is_read, is_reading = True, False
-        elif i == read_index:
-            # 마지막으로 저장된 위치가 이 회차 안이고, 아직 "다 읽음" 신호(SENTINEL)가 아니면 읽는 중
-            is_read, is_reading = False, True
-        else:
-            is_read, is_reading = False, False
+    for chapter in chapters:
+        is_read = chapter["id"] in read_ids
+        # "읽는 중"은 순서와 무관하게 지금 보고 있던 바로 그 회차 하나 - 이미 읽음으로
+        # 기록된 회차라면(예: 완독 처리) 굳이 읽는 중으로 겹쳐 표시하지 않음
+        is_reading = (not is_read) and chapter["id"] == current_chapter_id
         chapters_out.append(
             {
                 "id": chapter["id"],
@@ -397,10 +450,14 @@ def export_backup():
         "exported_at": datetime.utcnow().isoformat(),
         "progress": data["progress"],
         "app_settings": data["app_settings"],
+        "read_chapters": data["read_chapters"],
     }
     body = json.dumps(payload, ensure_ascii=False, indent=2)
     filename = f"webtoon-server-backup-{date.today().isoformat()}.json"
-    log.info(f"백업 생성 - progress {len(data['progress'])}건, settings {len(data['app_settings'])}건")
+    log.info(
+        f"백업 생성 - progress {len(data['progress'])}건, settings {len(data['app_settings'])}건, "
+        f"읽은 회차 {len(data['read_chapters'])}건"
+    )
     return Response(
         content=body,
         media_type="application/json",
@@ -412,17 +469,28 @@ class RestorePayload(BaseModel):
     version: int | None = None
     progress: list = []
     app_settings: list = []
+    read_chapters: list = []
 
 
 @app.post("/api/restore")
 def import_backup(body: RestorePayload):
-    progress_count, settings_count = db.import_backup_data(body.progress, body.app_settings)
+    progress_count, settings_count, read_count = db.import_backup_data(
+        body.progress, body.app_settings, body.read_chapters
+    )
 
     # 라이브러리 등록(제외 목록) 상태도 복원됐을 수 있으니 다시 스캔해서 반영
     _rescan_and_replace_catalog()
 
-    log.info(f"백업 복원 완료 - progress {progress_count}건, settings {settings_count}건")
-    return {"ok": True, "progress_count": progress_count, "settings_count": settings_count}
+    log.info(
+        f"백업 복원 완료 - progress {progress_count}건, settings {settings_count}건, "
+        f"읽은 회차 {read_count}건"
+    )
+    return {
+        "ok": True,
+        "progress_count": progress_count,
+        "settings_count": settings_count,
+        "read_chapters_count": read_count,
+    }
 
 
 # ---------------------------------------------------------------------------
