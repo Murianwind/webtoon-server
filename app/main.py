@@ -57,27 +57,78 @@ def make_id(*parts: str) -> str:
     return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def parse_chapter_label(stem: str):
+def _clean_title(text: str, strip_trailing_hash: bool = True) -> str:
+    """추출된 제목 후보에서 구분자/완결표시/날짜형 숫자/장식성 특수문자를 정리."""
+    # 앞뒤에 붙는 구분자류 제거 (마커 앞/뒤 어느 쪽 텍스트든 동일하게 적용)
+    text = re.sub(r"^[\s\-–—.:：·‧․・,]+", "", text)
+    text = re.sub(r"[\s\-–—.:：·‧․・,]+$", "", text)
+    if strip_trailing_hash:
+        # 카카오식 파일명 끝의 #숫자(회차 제목과 무관한 부가 번호) 제거
+        text = re.sub(r"#\d+$", "", text)
+    # 완결 표시 제거
+    text = re.sub(r"\(完\)|\(완\)|완결", "", text)
+    # 날짜로 추정되는 "숫자-숫자" 패턴 제거 (예: 6-28)
+    text = re.sub(r"\b\d{1,2}-\d{1,2}\b", "", text)
+    # 장식성 특수문자 제거 (단어 사이에 있을 수 있으니 공백으로 치환 후 나중에 정리)
+    text = re.sub(r"[？！～·‧․・•●○◆■□※]", " ", text)
+    # 끝에 남은 "(숫자)"는 " 숫자"로 (예: (2) -> " 2")
+    text = re.sub(r"\((\d+)\)\s*$", r" \1", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_")
+    return text
+
+
+def parse_chapter_label(stem: str, series_name: str = ""):
     """
     zip 파일명(확장자 제외)에서 (정렬키, 표시라벨) 추출.
 
     예)
-      "103 마법사랑해 100화 - 아스라이 스..." -> (103, "100화")
-      "0004_1화#64"                          -> (4,   "1화")
-      "0003_프롤로그#48"                      -> (3,   "프롤로그")
-      "104 마법사랑해 번외편 - 르네의 일기.." -> (104, "마법사랑해 번외편 - 르네의 일기..")
+      "103 마법사랑해 100화 - 아스라이 스러지는 (7)" -> (103, "100화 · 아스라이 스러지는 7")
+      "172 나이트런 Extra story - 1화" (series=나이트런) -> (172, "Extra story 1화")
+      "651 신의 탑 3부 233화" (series=신의 탑)          -> (651, "3부 233화")
+      "0004_1화#64"                                  -> (4,   "1화")
+      "0003_프롤로그#48"                              -> (3,   "프롤로그")
+      "104 마법사랑해 번외편 - 르네의 일기"           -> (104, "번외편 - 르네의 일기")
+      "117 기기괴괴2 절멸의 도시 #2" (series=기기괴괴2) -> (117, "절멸의 도시 2")
     """
     m = re.match(r"^(\d+)", stem)
     sort_key = int(m.group(1)) if m else 0
 
-    m2 = re.search(r"(\d+\s*화)", stem)
+    # 맨 앞 정렬번호 뒤 구분자(_ 또는 공백)로 카카오식/네이버식을 구분
+    # 카카오: "0004_1화#64" (언더스코어), 네이버: "103 마법사랑해 ..." (공백)
+    is_underscore_style = bool(re.match(r"^\d+_", stem))
+
+    rest = re.sub(r"^\d+[_\s]*", "", stem)
+
+    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록)
+    content = rest
+    if series_name and content.startswith(series_name):
+        content = content[len(series_name):]
+
+    m2 = re.search(r"(\d+\s*화)", content)
     if m2:
-        label = m2.group(1).replace(" ", "")
-    else:
-        label = re.sub(r"^\d+[_\s]*", "", stem)
-        label = re.sub(r"#\d+$", "", label).strip(" -_")
-        if not label:
-            label = stem
+        marker = m2.group(1).replace(" ", "")
+        # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
+        prefix = _clean_title(content[: m2.start()], strip_trailing_hash=False)
+        suffix = _clean_title(content[m2.end():])
+        label = f"{prefix} {marker}" if prefix else marker
+        if suffix:
+            label = f"{label} · {suffix}"
+        return sort_key, label
+
+    if not is_underscore_style:
+        # "N화" 표시가 없는 네이버식 파일명: "부제목 #번호" 패턴 시도 (예: 기기괴괴2)
+        hash_matches = list(re.finditer(r"#(\d+)", content))
+        if hash_matches:
+            last = hash_matches[-1]
+            number = last.group(1)
+            title_part = _clean_title(content[: last.start()], strip_trailing_hash=False)
+            if title_part:
+                return sort_key, f"{title_part} {number}"
+
+    # 그 외: "화" 표시도 "#번호"도 없는 경우 (예: 번외편)
+    label = _clean_title(content, strip_trailing_hash=True)
+    if not label:
+        label = stem
     return sort_key, label
 
 
@@ -294,7 +345,7 @@ def scan_library():
             chapters = []
             for fn in zip_files:
                 stem = fn[:-4]
-                sort_key, label = parse_chapter_label(stem)
+                sort_key, label = parse_chapter_label(stem, series_name)
                 chapter_id = make_id(platform, series_name, fn)
                 full_path = os.path.join(series_path, fn)
                 chapters.append(
