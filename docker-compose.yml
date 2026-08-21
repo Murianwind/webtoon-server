@@ -1,21 +1,33 @@
+# GitHub Actions가 push할 때마다 미리 빌드해서 GHCR에 올려주는 이미지를 pull해서 씁니다.
+# 로컬 빌드가 필요 없어서, CLI에서 `docker compose up -d`로 바로 실행하거나
+# Portainer의 "Web editor"에 그대로 붙여넣어도 됩니다 (repository 연결/clone/fork 필요 없음).
+#
+# 자동 업데이트: 아래 webtoon-server의 labels에 있는
+# com.centurylinklabs.watchtower.enable=true 는 Watchtower용 표시입니다.
+# 이미 Watchtower를 쓰고 계시면 --label-enable 옵션이 켜져 있는 한 자동으로 인식되어
+# 새 이미지가 올라올 때마다 갱신됩니다. Watchtower가 없다면 이 라벨은 그냥 무시되니
+# 지우지 않아도 되고, 필요할 때 Watchtower(https://containrrr.dev/watchtower/)를
+# 따로 띄우기만 하면 됩니다.
+#
+# 이 저장소를 fork해서 자신의 코드로 쓰고 싶다면 image의 OWNER 부분을 자신의
+# GitHub 계정명으로 바꿔주세요. 그냥 그대로 쓰기만 할 거라면 안 바꿔도 됩니다.
+
 services:
   webtoon-server:
-    build: .
+    image: ghcr.io/murianwind/webtoon-server:latest
     container_name: webtoon-server
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "${HOST_PORT:-8000}:8000"
     environment:
-      # hermes 알림 스크립트 같은 외부 알림이 만드는 바로가기가 이 주소 기준으로 생성됩니다.
       - "PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}"
-      # 라이브러리 자동 재스캔 주기(초). 기본 7200(2시간). 0으로 두면 자동 재스캔을 끔.
       - "RESCAN_INTERVAL_SECONDS=${RESCAN_INTERVAL_SECONDS:-7200}"
     volumes:
-      # 아래 두 변수(LIBRARY_..._PATH)에 실제 웹툰 폴더 경로를 넣어주세요.
-      # 오른쪽(/library/<플랫폼명>)은 코드가 "플랫폼 폴더"로 인식하는 이름입니다.
-      # 플랫폼을 더 추가/제거하고 싶으면 이 volumes 목록 자체를 늘리거나 줄이면 됩니다.
+      # 플랫폼 폴더는 원하는 만큼 자유롭게 추가/삭제 가능합니다. 자세한 설명은
+      # README의 "웹툰 폴더 여러 개 추가하기" 섹션을 참고하세요.
       - "${LIBRARY_NAVER_PATH}:/library/naver"
       - "${LIBRARY_KAKAO_PATH}:/library/kakao"
-      # 읽음 진행률(progress.db) 저장용 - 컨테이너 재배포해도 유지됨
       - "webtoon_data:/data"
     restart: unless-stopped
 
