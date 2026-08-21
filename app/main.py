@@ -79,6 +79,27 @@ def _clean_title(text: str, strip_trailing_hash: bool = True) -> str:
     return text
 
 
+_SEPARATOR_CLASS = r"[\s：:\-–—·‧․・,]*"
+
+
+def _series_prefix_end(content: str, series_name: str) -> int:
+    """
+    content가 series_name으로 시작하면 그 길이를 반환(없으면 0).
+    "：" vs 공백처럼 구두점/공백 표기가 실제 파일명과 달라도 매칭되도록,
+    시리즈명을 구분자 기준으로 쪼갠 뒤 구분자 자리는 느슨하게(０개 이상) 허용한다.
+    """
+    if not series_name:
+        return 0
+    parts = [p for p in re.split(r"[\s：:\-–—·‧․・,]+", series_name) if p]
+    if not parts:
+        return 0
+    pattern = r"^" + _SEPARATOR_CLASS.join(re.escape(p) for p in parts) + _SEPARATOR_CLASS
+    m = re.match(pattern, content)
+    if m and m.end() > 0:
+        return m.end()
+    return 0
+
+
 def parse_chapter_label(stem: str, series_name: str = ""):
     """
     zip 파일명(확장자 제외)에서 (정렬키, 표시라벨) 추출.
@@ -91,6 +112,8 @@ def parse_chapter_label(stem: str, series_name: str = ""):
       "0003_프롤로그#48"                              -> (3,   "프롤로그")
       "104 마법사랑해 번외편 - 르네의 일기"           -> (104, "번외편 - 르네의 일기")
       "117 기기괴괴2 절멸의 도시 #2" (series=기기괴괴2) -> (117, "절멸의 도시 2")
+      "017 로도스도 전기  사령의 여왕 제16화 ..." (series="로도스도 전기 ： 사령의 여왕")
+                                                     -> (17, "16화 · ...")
     """
     m = re.match(r"^(\d+)", stem)
     sort_key = int(m.group(1)) if m else 0
@@ -101,12 +124,16 @@ def parse_chapter_label(stem: str, series_name: str = ""):
 
     rest = re.sub(r"^\d+[_\s]*", "", stem)
 
-    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록)
+    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록).
+    # 폴더명과 파일명의 구두점 표기가 달라도(예: "：" vs 공백) 매칭되도록 느슨하게 비교.
     content = rest
-    if series_name and content.startswith(series_name):
-        content = content[len(series_name):]
+    prefix_end = _series_prefix_end(rest, series_name)
+    if prefix_end:
+        content = rest[prefix_end:]
 
-    m2 = re.search(r"(\d+\s*화)", content)
+    # "화" 앞에 "제"가 붙는 표기("제16화")는 "제"를 회차 번호의 일부로 취급해서
+    # 부제 프리픽스에 안 남게 함
+    m2 = re.search(r"(?:제\s*)?(\d+\s*화)", content)
     if m2:
         marker = m2.group(1).replace(" ", "")
         # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
@@ -674,6 +701,11 @@ def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
 # ---------------------------------------------------------------------------
 
 
+def _chapter_number_part(label: str) -> str:
+    """라벨에서 제목 부분(' · ' 뒤)을 떼고 회차 번호 부분만 반환."""
+    return label.split(" · ", 1)[0]
+
+
 @app.get("/api/series")
 def list_series():
     all_progress = get_all_progress()
@@ -683,6 +715,18 @@ def list_series():
         prog = all_progress.get(s["id"])
         # 진행률 기록이 없으면 전부 안읽음, 있으면 마지막으로 본 회차 이후를 안읽음으로 취급
         unread = total if not prog else max(total - prog["chapter_index"] - 1, 0)
+
+        if total == 0:
+            progress_display = ""
+        elif unread == 0:
+            progress_display = "완독"
+        else:
+            # 다음에 읽어야 할(또는 읽는 중인) 회차 번호 / 마지막 회차 번호
+            next_idx = max(0, min(total - unread, total - 1))
+            current_label = _chapter_number_part(s["chapters"][next_idx]["label"])
+            last_label = _chapter_number_part(s["chapters"][-1]["label"])
+            progress_display = f"{current_label}/{last_label}"
+
         result.append(
             {
                 "id": s["id"],
@@ -690,6 +734,7 @@ def list_series():
                 "title": s["title"],
                 "chapter_count": total,
                 "unread_count": unread,
+                "progress_display": progress_display,
                 "latest_update": s["latest_mtime"],
                 "cover_url": f"/api/series/{s['id']}/cover",
             }
@@ -797,9 +842,9 @@ def set_read_state(series_id: str, body: ReadStateIn):
             # 이미 그보다 더 뒤까지 읽은 상태라면 뒤로 되돌리지 않음.
             target_index = max(current_index, idx)
         else:
-            # 선택한 회차 "이후"는 모두 안읽음 처리 (선택한 회차 자체는 유지).
+            # 선택한 회차 "부터(포함)" 안읽음 처리 (선택한 회차 자체도 안읽음이 됨).
             # 이미 그보다 앞까지만 읽은 상태라면 앞으로 당기지 않음.
-            target_index = min(current_index, idx)
+            target_index = min(current_index, idx - 1)
     else:
         raise HTTPException(400, "scope must be 'all' or 'chapter'")
 
