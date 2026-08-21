@@ -198,34 +198,48 @@ def set_setting(key: str, value: str):
 
 
 # ---------------------------------------------------------------------------
-# 등록된 라이브러리(=/library 바로 아래 폴더 중 실제로 스캔할 폴더) 관리
-# 등록 해제는 이 목록에서 이름만 빼는 것이라, 실제 폴더/zip 파일은 절대 건드리지 않는다.
+# 시리즈 폴더 스캔 제외 관리 (플랫폼 폴더 안에 섞여 있는 웹툰 아닌 폴더 등을
+# 스캔에서 빼거나 다시 넣을 때 씀). 제외해도 실제 폴더/zip 파일은 절대 건드리지 않는다.
 # ---------------------------------------------------------------------------
 
-REGISTERED_LIBRARIES_KEY = "registered_libraries"
+EXCLUDED_SERIES_KEY = "excluded_series"
 
 
-def get_registered_libraries():
-    """등록된 라이브러리 이름 집합을 반환. 한 번도 설정된 적 없으면 None."""
-    raw = get_setting(REGISTERED_LIBRARIES_KEY)
-    if raw is None:
-        return None
+def get_excluded_series() -> set:
+    """제외된 (platform, series_name) 튜플 집합."""
+    raw = get_setting(EXCLUDED_SERIES_KEY)
+    if not raw:
+        return set()
     try:
         data = json.loads(raw)
-        return set(data) if isinstance(data, list) else set()
+        return {(item["platform"], item["series"]) for item in data if "platform" in item and "series" in item}
     except Exception:
         return set()
 
 
-def set_registered_libraries(names):
-    set_setting(REGISTERED_LIBRARIES_KEY, json.dumps(sorted(names), ensure_ascii=False))
+def set_excluded_series(pairs) -> None:
+    data = [{"platform": p, "series": s} for p, s in sorted(pairs)]
+    set_setting(EXCLUDED_SERIES_KEY, json.dumps(data, ensure_ascii=False))
 
 
-def list_library_dirs():
-    """LIBRARY_ROOT 바로 아래에 실제로 존재하는 폴더 이름 목록."""
+def list_all_series_folders():
+    """디스크상에 있는 (zip이 하나라도 있는) 모든 (platform, series) 폴더 목록.
+    제외 여부와 무관하게 전부 보여준다 - 제외됐던 걸 다시 추가할 때 필요."""
+    result = []
     if not os.path.isdir(LIBRARY_ROOT):
-        return []
-    return sorted(d for d in os.listdir(LIBRARY_ROOT) if os.path.isdir(os.path.join(LIBRARY_ROOT, d)))
+        return result
+    for platform in sorted(os.listdir(LIBRARY_ROOT)):
+        platform_path = os.path.join(LIBRARY_ROOT, platform)
+        if not os.path.isdir(platform_path):
+            continue
+        for series_name in sorted(os.listdir(platform_path)):
+            series_path = os.path.join(platform_path, series_name)
+            if not os.path.isdir(series_path):
+                continue
+            has_zip = any(f.lower().endswith(".zip") for f in os.listdir(series_path))
+            if has_zip:
+                result.append({"platform": platform, "series": series_name})
+    return result
 
 
 # 회차의 page_index로 이 값이 저장되어 있으면 "그 회차까지 다 읽었다"는 뜻.
@@ -257,21 +271,17 @@ def scan_library():
     if not os.path.isdir(LIBRARY_ROOT):
         return series_map, chapters_map
 
-    all_dirs = list_library_dirs()
+    excluded = get_excluded_series()
 
-    registered = get_registered_libraries()
-    if registered is None:
-        # 처음 실행(설정이 아예 없음): 지금 있는 폴더 전부를 등록된 것으로 간주해서
-        # 기존 사용자가 업데이트해도 라이브러리가 갑자기 비지 않게 한다.
-        registered = set(all_dirs)
-        set_registered_libraries(registered)
-
-    for platform in all_dirs:
-        if platform not in registered:
-            continue
+    for platform in sorted(os.listdir(LIBRARY_ROOT)):
         platform_path = os.path.join(LIBRARY_ROOT, platform)
+        if not os.path.isdir(platform_path):
+            continue
 
         for series_name in sorted(os.listdir(platform_path)):
+            if (platform, series_name) in excluded:
+                continue
+
             series_path = os.path.join(platform_path, series_name)
             if not os.path.isdir(series_path):
                 continue
@@ -363,57 +373,51 @@ def rescan():
 
 
 # ---------------------------------------------------------------------------
-# 라이브러리(=/library 바로 아래 폴더) 등록/해제
+# 시리즈 폴더 스캔 제외/포함 (플랫폼 폴더 안에 웹툰 아닌 폴더가 섞여 있을 때
+# 특정 폴더만 스캔 대상에서 뺐다가 나중에 다시 넣을 수 있게 함)
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/libraries")
-def list_libraries():
-    """LIBRARY_ROOT 바로 아래의 폴더들을 등록/미등록으로 나눠서 보여준다."""
-    all_dirs = list_library_dirs()
-    registered = get_registered_libraries()
-    if registered is None:
-        registered = set(all_dirs)
-        set_registered_libraries(registered)
+@app.get("/api/series-folders")
+def list_series_folders():
+    """디스크상의 모든 시리즈 폴더를 스캔 중/제외됨으로 나눠서 보여준다."""
+    excluded = get_excluded_series()
+    all_folders = list_all_series_folders()
     return {
-        "registered": [d for d in all_dirs if d in registered],
-        "available": [d for d in all_dirs if d not in registered],
+        "included": [f for f in all_folders if (f["platform"], f["series"]) not in excluded],
+        "excluded": [f for f in all_folders if (f["platform"], f["series"]) in excluded],
     }
 
 
-@app.post("/api/libraries/{name}/register")
-def register_library(name: str):
-    if not os.path.isdir(LIBRARY_ROOT):
-        raise HTTPException(404, "라이브러리 루트가 없습니다")
-    if not os.path.isdir(os.path.join(LIBRARY_ROOT, name)):
-        raise HTTPException(404, f"'{name}' 폴더가 존재하지 않습니다")
-
-    registered = get_registered_libraries() or set()
-    registered.add(name)
-    set_registered_libraries(registered)
-
-    s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
-    log.info(f"라이브러리 등록: {name} (시리즈 {len(s)}개로 갱신됨)")
-    return {"ok": True, "registered": sorted(registered)}
+class SeriesFolderRef(BaseModel):
+    platform: str
+    series: str
 
 
-@app.delete("/api/libraries/{name}")
-def unregister_library(name: str):
-    """등록 목록에서만 제외한다. 실제 폴더/zip 파일은 절대 삭제하지 않는다."""
-    registered = get_registered_libraries() or set()
-    if name not in registered:
-        raise HTTPException(404, "등록되지 않은 라이브러리입니다")
-
-    registered.discard(name)
-    set_registered_libraries(registered)
+@app.post("/api/series-folders/exclude")
+def exclude_series_folder(body: SeriesFolderRef):
+    excluded = get_excluded_series()
+    excluded.add((body.platform, body.series))
+    set_excluded_series(excluded)
 
     s, c = scan_library()
     _catalog["series"] = s
     _catalog["chapters"] = c
-    log.info(f"라이브러리 등록 해제: {name} (파일은 삭제하지 않음, 시리즈 {len(s)}개로 갱신됨)")
-    return {"ok": True, "registered": sorted(registered)}
+    log.info(f"시리즈 폴더 스캔 제외: {body.platform}/{body.series} (파일은 삭제하지 않음)")
+    return {"ok": True}
+
+
+@app.post("/api/series-folders/include")
+def include_series_folder(body: SeriesFolderRef):
+    excluded = get_excluded_series()
+    excluded.discard((body.platform, body.series))
+    set_excluded_series(excluded)
+
+    s, c = scan_library()
+    _catalog["series"] = s
+    _catalog["chapters"] = c
+    log.info(f"시리즈 폴더 다시 포함: {body.platform}/{body.series}")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

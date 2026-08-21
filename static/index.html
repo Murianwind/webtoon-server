@@ -31,22 +31,23 @@
 
 <div id="settingsPanel" class="read-action-panel" style="display:none">
   <div class="read-action-header">
-    <span>라이브러리 / 백업</span>
+    <span>시리즈 폴더 / 백업</span>
     <button id="settingsClose" class="read-action-close" aria-label="닫기">×</button>
   </div>
   <div id="settingsBody">
     <div class="settings-section">
-      <div class="settings-section-title">등록된 라이브러리</div>
-      <div id="registeredLibList" class="lib-list"></div>
+      <div class="settings-section-title">스캔 중인 시리즈 폴더</div>
+      <div id="includedFolderList" class="lib-list"></div>
+      <div class="settings-hint">웹툰이 아닌 폴더가 섞여 있으면 "제외"를 눌러 스캔에서 뺄 수 있습니다.
+      제외해도 실제 폴더나 zip 파일은 절대 지워지지 않습니다.</div>
     </div>
     <div class="settings-section">
-      <div class="settings-section-title">등록 가능한 폴더</div>
-      <div id="availableLibList" class="lib-list"></div>
-      <div class="settings-hint">삭제(등록 해제)해도 실제 폴더나 zip 파일은 절대 지워지지 않습니다.</div>
+      <div class="settings-section-title">제외된 폴더</div>
+      <div id="excludedFolderList" class="lib-list"></div>
     </div>
     <div class="settings-section">
       <div class="settings-section-title">백업 / 복원</div>
-      <div class="settings-hint">읽음 진행률, 검색/정렬/필터 설정, 라이브러리 등록 상태를 전부 포함합니다.</div>
+      <div class="settings-hint">읽음 진행률, 검색/정렬/필터 설정, 제외된 폴더 목록을 전부 포함합니다.</div>
       <div class="read-action-picker-buttons">
         <a id="backupBtn" href="/api/backup" class="mark-all-btn" download>백업 다운로드</a>
         <button id="restoreBtn" class="mark-all-btn ghost">복원</button>
@@ -399,65 +400,70 @@ rescanBtn.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------
-// 설정 패널: 라이브러리 등록/해제 + 백업/복원
+// 설정 패널: 시리즈 폴더 제외/포함 + 백업/복원
 // ---------------------------------------------------------------------
 
 const settingsPanel = document.getElementById("settingsPanel");
 
-async function renderLibraryLists() {
-  const registeredEl = document.getElementById("registeredLibList");
-  const availableEl = document.getElementById("availableLibList");
-  registeredEl.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
-  availableEl.innerHTML = "";
+function folderLabel(f) {
+  return `${f.platform} / ${f.series}`;
+}
+
+async function renderFolderLists() {
+  const includedEl = document.getElementById("includedFolderList");
+  const excludedEl = document.getElementById("excludedFolderList");
+  includedEl.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
+  excludedEl.innerHTML = "";
 
   let data;
   try {
-    const res = await fetch("/api/libraries");
+    const res = await fetch("/api/series-folders");
     data = await res.json();
   } catch (e) {
-    registeredEl.innerHTML = `<div class="empty-state">불러오지 못했습니다.</div>`;
+    includedEl.innerHTML = `<div class="empty-state">불러오지 못했습니다.</div>`;
     return;
   }
 
-  registeredEl.innerHTML = "";
-  if (data.registered.length === 0) {
-    registeredEl.innerHTML = `<div class="picker-loading">등록된 라이브러리가 없습니다.</div>`;
+  includedEl.innerHTML = "";
+  if (data.included.length === 0) {
+    includedEl.innerHTML = `<div class="picker-loading">스캔 중인 폴더가 없습니다.</div>`;
   }
-  for (const name of data.registered) {
+  for (const f of data.included) {
     const row = document.createElement("div");
     row.className = "lib-row";
     row.innerHTML = `
-      <span class="lib-name">${name}</span>
-      <button class="lib-action-btn" data-action="unregister" data-name="${name}">삭제</button>
+      <span class="lib-name">${folderLabel(f)}</span>
+      <button class="lib-action-btn" data-action="exclude" data-platform="${f.platform}" data-series="${f.series}">제외</button>
     `;
-    registeredEl.appendChild(row);
+    includedEl.appendChild(row);
   }
 
-  if (data.available.length === 0) {
-    availableEl.innerHTML = `<div class="picker-loading">추가로 등록할 수 있는 폴더가 없습니다.</div>`;
+  if (data.excluded.length === 0) {
+    excludedEl.innerHTML = `<div class="picker-loading">제외된 폴더가 없습니다.</div>`;
   }
-  for (const name of data.available) {
+  for (const f of data.excluded) {
     const row = document.createElement("div");
     row.className = "lib-row";
     row.innerHTML = `
-      <span class="lib-name">${name}</span>
-      <button class="lib-action-btn add" data-action="register" data-name="${name}">등록</button>
+      <span class="lib-name">${folderLabel(f)}</span>
+      <button class="lib-action-btn add" data-action="include" data-platform="${f.platform}" data-series="${f.series}">다시 추가</button>
     `;
-    availableEl.appendChild(row);
+    excludedEl.appendChild(row);
   }
 
   for (const btn of document.querySelectorAll(".lib-action-btn")) {
     btn.addEventListener("click", async () => {
-      const name = btn.dataset.name;
+      const platform = btn.dataset.platform;
+      const series = btn.dataset.series;
       const action = btn.dataset.action;
       btn.disabled = true;
       try {
-        if (action === "register") {
-          await fetch(`/api/libraries/${encodeURIComponent(name)}/register`, { method: "POST" });
-        } else {
-          await fetch(`/api/libraries/${encodeURIComponent(name)}`, { method: "DELETE" });
-        }
-        await renderLibraryLists();
+        await fetch(`/api/series-folders/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ platform, series }),
+        });
+        await renderFolderLists();
         await load();
       } finally {
         btn.disabled = false;
@@ -468,7 +474,7 @@ async function renderLibraryLists() {
 
 function openSettingsPanel() {
   settingsPanel.style.display = "block";
-  renderLibraryLists();
+  renderFolderLists();
 }
 function closeSettingsPanel() {
   settingsPanel.style.display = "none";
@@ -502,7 +508,7 @@ restoreFileInput.addEventListener("change", async () => {
     if (!res.ok) throw new Error("restore failed");
     alert("복원이 완료되었습니다.");
     await load();
-    await renderLibraryLists();
+    await renderFolderLists();
   } catch (e) {
     alert("복원에 실패했습니다. 올바른 백업 파일인지 확인해주세요.");
   } finally {
