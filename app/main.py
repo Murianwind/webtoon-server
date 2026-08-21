@@ -384,9 +384,18 @@ def set_read_state(series_id: str, body: ReadStateIn):
         idx = next((i for i, c in enumerate(chapters) if c["id"] == body.chapter_id), None)
         if idx is None:
             raise HTTPException(404, "chapter not found in series")
-        # read=true  -> 이 회차까지(포함) 전부 읽음 처리
-        # read=false -> 이 회차부터(포함) 안읽음으로 되돌림 (바로 앞 회차까지만 읽음 유지)
-        target_index = idx if body.read else idx - 1
+
+        prog = get_progress(series_id)
+        current_index = prog["chapter_index"] if prog else -1
+
+        if body.read:
+            # 선택한 회차 "이전(및 선택한 회차 자체)"은 모두 읽음 처리.
+            # 이미 그보다 더 뒤까지 읽은 상태라면 뒤로 되돌리지 않음.
+            target_index = max(current_index, idx)
+        else:
+            # 선택한 회차 "이후"는 모두 안읽음 처리 (선택한 회차 자체는 유지).
+            # 이미 그보다 앞까지만 읽은 상태라면 앞으로 당기지 않음.
+            target_index = min(current_index, idx)
     else:
         raise HTTPException(400, "scope must be 'all' or 'chapter'")
 
@@ -421,19 +430,32 @@ def list_chapters(series_id: str):
         raise HTTPException(404, "series not found")
     prog = get_progress(series_id)
     read_index = prog["chapter_index"] if prog else -1
-    return {
-        "id": s["id"],
-        "platform": s["platform"],
-        "title": s["title"],
-        "chapters": [
+    page_index = prog["page_index"] if prog else 0
+
+    chapters_out = []
+    for i, c in enumerate(s["chapters"]):
+        if i < read_index or (i == read_index and page_index >= PAGE_FINISHED_SENTINEL):
+            is_read, is_reading = True, False
+        elif i == read_index:
+            # 마지막으로 저장된 위치가 이 회차 안이고, 아직 "다 읽음" 신호(SENTINEL)가 아니면 읽는 중
+            is_read, is_reading = False, True
+        else:
+            is_read, is_reading = False, False
+        chapters_out.append(
             {
                 "id": c["id"],
                 "label": c["label"],
                 "sort_key": c["sort_key"],
-                "read": i <= read_index,
+                "read": is_read,
+                "reading": is_reading,
             }
-            for i, c in enumerate(s["chapters"])
-        ],
+        )
+
+    return {
+        "id": s["id"],
+        "platform": s["platform"],
+        "title": s["title"],
+        "chapters": chapters_out,
     }
 
 

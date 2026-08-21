@@ -250,7 +250,7 @@ async function renderChapterPickers() {
       <span class="picker-series-title">${data.title}</span>
       <select data-series-id="${seriesId}">
         ${data.chapters
-          .map((c) => `<option value="${c.id}">${c.label}${c.read ? " (읽음)" : ""}</option>`)
+          .map((c) => `<option value="${c.id}">${c.label}${c.read ? " (읽음)" : c.reading ? " (읽는 중)" : ""}</option>`)
           .join("")}
       </select>
     `;
