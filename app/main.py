@@ -99,6 +99,12 @@ async def rescan():
     return {"series_count": len(series_map)}
 
 
+@app.get("/api/scan-status")
+def scan_status():
+    """설정 패널 등에 표시할 마지막 스캔 시각."""
+    return {"last_scan_at": catalog.get_last_scan_display()}
+
+
 # ---------------------------------------------------------------------------
 # 시리즈 폴더 스캔 제외/포함 (플랫폼 폴더 안에 웹툰 아닌 폴더가 섞여 있을 때
 # 특정 폴더만 스캔 대상에서 뺐다가 나중에 다시 넣을 수 있게 함)
@@ -184,27 +190,30 @@ def list_series():
 
 
 @app.get("/api/lookup/latest")
-def lookup_latest(platform: str, series: str):
+def lookup_latest(series: str, platform: str | None = None):
     """
     hermes(webtoon_checker.py 등)가 디스코드 알림에 붙일 바로가기 URL을 구할 때 쓰는 API.
-    플랫폼 폴더명과 시리즈 폴더명을 정확히 알고 있을 때, 그 시리즈의 최신 화로 바로 가는
-    URL을 돌려준다. platform 값은 /library 아래 실제 폴더명과 정확히 같아야 한다
-    (예: 폴더가 "네이버"면 여기도 "네이버" - 영문 "naver"를 하드코딩해두면 어긋난다).
+    시리즈 폴더명만으로 찾을 수 있다 - platform은 선택사항이며, 여러 플랫폼에 같은 이름의
+    시리즈가 있어 구분이 필요할 때만 넘기면 된다. (platform을 필수로 요구하면, 서버 쪽
+    /library 폴더명을 나중에 바꿀 때마다 호출하는 쪽 코드도 같이 고쳐야 하는 문제가 있었음)
     """
     for candidate in catalog.get_series_map().values():
-        if candidate["platform"] == platform and candidate["title"] == series:
-            if not candidate["chapters"]:
-                raise HTTPException(404, "series has no chapters")
-            latest = candidate["chapters"][-1]
-            url = None
-            if PUBLIC_BASE_URL:
-                url = f"{PUBLIC_BASE_URL}/reader.html?series={candidate['id']}&chapter={latest['id']}&page=0"
-            return {
-                "series_id": candidate["id"],
-                "chapter_id": latest["id"],
-                "chapter_label": latest["label"],
-                "url": url,
-            }
+        if candidate["title"] != series:
+            continue
+        if platform is not None and candidate["platform"] != platform:
+            continue
+        if not candidate["chapters"]:
+            raise HTTPException(404, "series has no chapters")
+        latest = candidate["chapters"][-1]
+        url = None
+        if PUBLIC_BASE_URL:
+            url = f"{PUBLIC_BASE_URL}/reader.html?series={candidate['id']}&chapter={latest['id']}&page=0"
+        return {
+            "series_id": candidate["id"],
+            "chapter_id": latest["id"],
+            "chapter_label": latest["label"],
+            "url": url,
+        }
     raise HTTPException(404, "series not found")
 
 

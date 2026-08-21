@@ -16,6 +16,7 @@
 <body>
 <header class="topbar">
   <h1>내 웹툰</h1>
+  <span id="scanStatusText" class="scan-status-text"></span>
   <button id="settingsBtn" class="rescan-btn" title="라이브러리/백업 설정" aria-label="설정">⚙</button>
   <button id="rescanBtn" class="rescan-btn" title="새로고침(재스캔)" aria-label="재스캔">⟳</button>
 </header>
@@ -376,14 +377,27 @@ async function fetchSeries() {
   }
 }
 
+async function fetchScanStatus() {
+  try {
+    const res = await fetch("/api/scan-status");
+    const data = await res.json();
+    document.getElementById("scanStatusText").textContent = data.last_scan_at
+      ? `마지막 스캔 ${data.last_scan_at}`
+      : "";
+  } catch (e) {
+    // 실패해도 조용히 무시 (표시만 안 될 뿐 기능엔 영향 없음)
+  }
+}
+
 async function load() {
   const ok = await fetchSeries();
   if (ok) render();
+  fetchScanStatus();
 }
 
 async function init() {
   renderFilterTabs(); // 기본값(전체)으로 우선 표시
-  const [ok] = await Promise.all([fetchSeries(), loadFilterSetting()]);
+  const [ok] = await Promise.all([fetchSeries(), loadFilterSetting(), fetchScanStatus()]);
   renderFilterTabs(); // 서버 값 반영해서 다시 그림
   if (ok) render();
 }
@@ -472,7 +486,8 @@ async function handleFolderToggle(f, wasIncluded, row, btn) {
     maybeShowEmptyPlaceholder(fromEl, wasIncluded ? "스캔 중인 폴더가 없습니다." : "제외된 폴더가 없습니다.");
 
     clearPlaceholder(toEl);
-    toEl.appendChild(createFolderRow(f, !wasIncluded));
+    // 방금 옮겨진 항목이 눈에 잘 띄도록 맨 아래가 아니라 맨 위에 넣음
+    toEl.prepend(createFolderRow(f, !wasIncluded));
 
     await load(); // 메인 시리즈 목록(그리드) 갱신
   } catch (e) {

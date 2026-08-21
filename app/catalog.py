@@ -6,7 +6,9 @@
 (단일 책임: 상태 저장/조회, 스캔 방법은 모름).
 """
 
-_state = {"series": {}, "chapters": {}}
+from datetime import datetime
+
+_state = {"series": {}, "chapters": {}, "last_scan_at": None}
 
 
 def get_series_map() -> dict:
@@ -25,9 +27,17 @@ def get_chapter_zip_path(chapter_id: str) -> str | None:
     return _state["chapters"].get(chapter_id)
 
 
+def get_last_scan_display() -> str | None:
+    """마지막 스캔 시각을 "YYYY-MM-DD HH:MM" 형식으로 반환 (없으면 None).
+    TZ 환경변수가 설정되어 있으면 그 시간대 기준으로 표시된다."""
+    dt = _state["last_scan_at"]
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else None
+
+
 def replace(series_map: dict, chapters_map: dict) -> None:
     _state["series"] = series_map
     _state["chapters"] = chapters_map
+    _state["last_scan_at"] = datetime.now()
 
 
 def diff_and_replace(series_map: dict, chapters_map: dict) -> tuple[int, int]:

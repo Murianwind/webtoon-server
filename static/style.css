@@ -55,6 +55,14 @@ a {
   color: var(--text);
 }
 
+.scan-status-text {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .rescan-btn {
   flex-shrink: 0;
   width: 32px;
@@ -66,9 +74,6 @@ a {
   font-size: 17px;
   line-height: 1;
   cursor: pointer;
-}
-#settingsBtn.rescan-btn {
-  margin-left: auto;
 }
 .rescan-btn:hover {
   background: rgba(255, 255, 255, 0.16);
