@@ -61,15 +61,34 @@ LIBRARY_ROOT (컨테이너 내부 /library)
 
 `.env`는 절대 커밋하지 마세요 (`.gitignore`에 포함되어 있습니다). 개인 경로/도메인이 여기 들어갑니다.
 
-## Portainer로 올리기
+## Portainer로 올리기 (포크/클론 불필요)
 
-1. 이 저장소를 자신의 GitHub 계정으로 fork하거나 그대로 clone해서 사용
-2. Portainer → Stacks → Add stack → Repository 방식으로 저장소 연결
-3. Portainer의 **Environment variables** 섹션에 `.env`와 동일한 값들을 직접 입력
+**직접 코드를 고칠 게 아니라면 fork나 clone 없이 이 저장소를 그대로 가리키기만 해도 됩니다.**
+Portainer가 자신의 서버에서 이 저장소를 clone → build → 실행까지 전부 알아서 처리합니다.
+
+1. Portainer → Stacks → Add stack → Repository 방식 선택
+2. Repository URL에 이 저장소 주소를 그대로 입력
+3. Portainer의 **Environment variables** 섹션에 아래 값을 직접 입력
    (저장소의 `docker-compose.yml`에는 개인 정보가 전혀 들어가지 않으므로, 실제 경로/도메인은
    반드시 Portainer 쪽에만 저장됩니다)
 4. Deploy the stack
-5. 코드 수정 후에는 Portainer에서 "Pull and redeploy" (또는 GitHub 웹훅으로 자동화 가능)
+5. 코드 수정 후에는 Portainer에서 "Pull and redeploy"
+
+## 자동 업데이트
+
+**메인테이너가 아닌 일반 이용자** 입장에서는 이 저장소에 웹훅을 등록할 권한이 없으므로,
+"push하면 자동 반영"은 표준 웹훅 방식으로는 안 됩니다. 대신 두 가지 방법이 있습니다.
+
+**방법 A — 직접 build (기본 `docker-compose.yml`)**
+가장 간단하지만 자동 업데이트는 안 되고, Portainer에서 수동으로 "Pull and redeploy"를 눌러야
+새 버전이 반영됩니다.
+
+**방법 B — GHCR 이미지 + Watchtower (`docker-compose.ghcr.yml`)**
+이 저장소는 GitHub Actions로 push할 때마다 이미지를 빌드해서 GHCR(`ghcr.io/.../webtoon-server`)에
+자동으로 올려둡니다. Portainer 스택 생성 시 Compose path를 `docker-compose.ghcr.yml`로 지정하면
+로컬 빌드 없이 이 이미지를 그대로 pull해서 씁니다. 이 compose 파일에는 Watchtower가 같이 포함되어
+있어서, 새 이미지가 올라올 때마다(기본 1시간마다 확인) 자동으로 pull 후 재시작합니다.
+이미 다른 Watchtower를 쓰고 계시다면 이 파일에서 `watchtower` 서비스는 지우고 라벨만 남겨도 됩니다.
 
 ## 환경변수
 
