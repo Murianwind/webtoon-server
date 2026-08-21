@@ -58,6 +58,15 @@
 </aside>
 <div id="settingsOverlay" class="sidebar-overlay"></div>
 
+<aside id="chapterSidebar" class="sidebar">
+  <div class="sidebar-header">
+    <span id="chapterSidebarTitle">회차 목록</span>
+    <button id="chapterSidebarClose" class="sidebar-close" aria-label="닫기">×</button>
+  </div>
+  <div id="chapterSidebarList" class="sidebar-list"></div>
+</aside>
+<div id="chapterSidebarOverlay" class="sidebar-overlay"></div>
+
 <div id="readActionPanel" class="read-action-panel" style="display:none">
   <div class="read-action-header">
     <span id="readActionTitle"></span>
@@ -177,6 +186,7 @@ function render() {
         <span class="platform-tag">${s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
+        <button class="chapter-list-toggle" title="회차 목록" aria-label="회차 목록">≡</button>
         <button class="select-toggle" title="읽음 상태 관리용 선택" aria-label="읽음 상태 관리용 선택">${isSelected ? "●" : "○"}</button>
       </div>
       <div class="title">${s.title}</div>
@@ -189,6 +199,10 @@ function render() {
       actionMode = null; // 선택이 바뀌면 4버튼 화면으로 되돌림
       renderActionPanel();
       render();
+    });
+    card.querySelector(".chapter-list-toggle").addEventListener("click", (e) => {
+      e.stopPropagation();
+      openChapterSidebar(s);
     });
     card.addEventListener("click", () => goContinue(s.id));
     grid.appendChild(card);
@@ -215,6 +229,7 @@ function clearSelection() {
   selectedIds = new Set();
   actionMode = null;
   renderActionPanel();
+  render(); // 카드의 선택 표시(●)도 즉시 지워야 함
 }
 
 function renderActionPanel() {
@@ -546,6 +561,56 @@ restoreFileInput.addEventListener("change", async () => {
     restoreFileInput.value = "";
   }
 });
+
+// ---------------------------------------------------------------------
+// 회차 목록 사이드바 (페이지 이동 없이 목록 화면에서 바로 펼침)
+// ---------------------------------------------------------------------
+
+const chapterSidebar = document.getElementById("chapterSidebar");
+const chapterSidebarOverlay = document.getElementById("chapterSidebarOverlay");
+const chapterSidebarList = document.getElementById("chapterSidebarList");
+const chapterSidebarTitle = document.getElementById("chapterSidebarTitle");
+
+async function openChapterSidebar(series) {
+  chapterSidebarTitle.textContent = series.title;
+  chapterSidebarList.innerHTML = `<div class="picker-loading">불러오는 중...</div>`;
+  chapterSidebar.classList.add("open");
+  chapterSidebarOverlay.classList.add("open");
+
+  let data;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(series.id)}/chapters`);
+    data = await res.json();
+  } catch (e) {
+    chapterSidebarList.innerHTML = `<div class="empty-state">회차 목록을 불러오지 못했습니다.</div>`;
+    return;
+  }
+
+  chapterSidebarList.innerHTML = "";
+  // 오름차순 그대로 (최신화가 맨 아래로) - 리더 화면 사이드바와 동일한 순서
+  for (const ch of data.chapters) {
+    const row = document.createElement("div");
+    row.className = "sidebar-row";
+    const statusText = ch.read ? "읽음" : ch.reading ? "읽는 중" : "";
+    const statusClass = ch.read ? "read" : ch.reading ? "reading" : "";
+    row.innerHTML = `
+      <span class="sidebar-row-label">${ch.label}</span>
+      <span class="sidebar-row-status${statusClass ? " " + statusClass : ""}">${statusText}</span>
+    `;
+    row.addEventListener("click", () => {
+      location.href = `/reader.html?series=${encodeURIComponent(series.id)}&chapter=${encodeURIComponent(ch.id)}&page=0`;
+    });
+    chapterSidebarList.appendChild(row);
+  }
+}
+
+function closeChapterSidebar() {
+  chapterSidebar.classList.remove("open");
+  chapterSidebarOverlay.classList.remove("open");
+}
+
+document.getElementById("chapterSidebarClose").addEventListener("click", closeChapterSidebar);
+chapterSidebarOverlay.addEventListener("click", closeChapterSidebar);
 
 init();
 </script>
