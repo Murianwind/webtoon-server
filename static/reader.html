@@ -122,18 +122,13 @@ function scheduleSaveProgress() {
 async function appendChapter(chapter, { scrollToPage = null } = {}) {
   loadMoreObserver.disconnect();
 
-  const divider = document.createElement("div");
-  divider.className = "chapter-divider";
-  divider.dataset.chapterId = chapter.id;
-  divider.textContent = chapter.label;
-  pagesEl.appendChild(divider);
-
   const res = await fetch(`/api/chapters/${encodeURIComponent(chapter.id)}/pages`);
   const data = await res.json();
   const pageCount = data.page_count || 0;
 
   let targetImg = null;
   let lastImg = null;
+  let firstImg = null;
   for (let i = 0; i < pageCount; i++) {
     const img = document.createElement("img");
     img.dataset.chapter = chapter.id;
@@ -144,10 +139,11 @@ async function appendChapter(chapter, { scrollToPage = null } = {}) {
     pagesEl.appendChild(img);
     pageObserver.observe(img);
     lastImg = img;
+    if (i === 0) firstImg = img;
     if (scrollToPage !== null && i === scrollToPage) targetImg = img;
   }
 
-  loadedChapters.push({ id: chapter.id, pageCount });
+  loadedChapters.push({ id: chapter.id, pageCount, firstImg });
 
   if (targetImg) {
     const scrollNow = () => targetImg.scrollIntoView({ block: "start" });
@@ -204,8 +200,9 @@ function renderSidebar() {
     row.dataset.chapterId = ch.id;
     row.textContent = ch.label;
     row.addEventListener("click", () => {
-      if (loadedChapters.some((c) => c.id === ch.id)) {
-        const target = document.querySelector(`.chapter-divider[data-chapter-id="${ch.id}"]`);
+      const loaded = loadedChapters.find((c) => c.id === ch.id);
+      if (loaded) {
+        const target = document.querySelector(`img[data-chapter="${ch.id}"][data-page="0"]`);
         if (target) target.scrollIntoView({ block: "start" });
         closeSidebar();
       } else {
@@ -240,7 +237,7 @@ document.getElementById("sidebarClose").addEventListener("click", closeSidebar);
 document.getElementById("sidebarOverlay").addEventListener("click", closeSidebar);
 
 // ---------------------------------------------------------------------
-// 상단바 자동 숨김
+// 상단바 자동 숨김 + 화면 클릭 시 토글
 // ---------------------------------------------------------------------
 
 let lastY = window.scrollY;
@@ -255,6 +252,11 @@ window.addEventListener(
   },
   { passive: true }
 );
+
+pagesEl.addEventListener("click", (e) => {
+  // 링크(다음 화 카드 등) 클릭은 그대로 이동하도록 두고 토글만 별도로 처리
+  topbar.classList.toggle("hidden");
+});
 
 // ---------------------------------------------------------------------
 // 초기 로딩
