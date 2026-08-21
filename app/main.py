@@ -4,11 +4,13 @@ import zipfile
 import hashlib
 import sqlite3
 import datetime
+import io
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from PIL import Image
 
 # 라이브러리 루트: 이 폴더 바로 아래 1depth = 플랫폼(naver/kakao 등),
 # 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차
@@ -16,6 +18,10 @@ LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
 
 # 읽음 진행률을 저장하는 SQLite 파일 (컨테이너 재시작에도 남도록 볼륨 마운트 필요)
 DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
+
+# 외부(디스코드 등)에 공개되는 URL을 만들 때 쓰는 기준 주소.
+# 예: https://komga.murian.ddnsfree.com (Komga가 쓰던 도메인을 그대로 재사용)
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 IMAGE_MEDIA_TYPES = {
@@ -289,6 +295,32 @@ def _list_images(zip_path: str):
     return names
 
 
+# 썸네일(시리즈 커버)은 원본을 그대로 주지 않고 리사이즈+압축해서 캐싱한다.
+# 웹툰 첫 페이지는 세로로 아주 긴 원본 이미지(수 MB)인 경우가 흔해서,
+# 그대로 내려주면 모바일에서 목록 화면이 매우 느려지고 무거워진다.
+COVER_MAX_WIDTH = 400
+_cover_cache = {}  # series_id -> (source_mtime, jpeg_bytes)
+
+
+def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
+    with zipfile.ZipFile(zip_path) as zf:
+        raw = zf.read(image_name)
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        if img.width > COVER_MAX_WIDTH:
+            ratio = COVER_MAX_WIDTH / img.width
+            new_height = max(1, round(img.height * ratio))
+            img = img.resize((COVER_MAX_WIDTH, new_height), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=78, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        # 변환에 실패해도(손상/미지원 포맷 등) 최소한 원본이라도 보여준다
+        ext = os.path.splitext(image_name)[1].lower()
+        return raw, IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream")
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
@@ -316,6 +348,30 @@ def list_series():
         )
     result.sort(key=lambda x: (x["platform"], x["title"]))
     return result
+
+
+@app.get("/api/lookup/latest")
+def lookup_latest(platform: str, series: str):
+    """
+    hermes(webtoon_checker.py 등)가 디스코드 알림에 붙일 바로가기 URL을 구할 때 쓰는 API.
+    플랫폼 폴더명(예: naver)과 시리즈 폴더명을 정확히 알고 있을 때, 그 시리즈의
+    최신 화로 바로 가는 URL을 돌려준다.
+    """
+    for s in _catalog["series"].values():
+        if s["platform"] == platform and s["title"] == series:
+            if not s["chapters"]:
+                raise HTTPException(404, "series has no chapters")
+            latest = s["chapters"][-1]
+            url = None
+            if PUBLIC_BASE_URL:
+                url = f"{PUBLIC_BASE_URL}/reader.html?series={s['id']}&chapter={latest['id']}&page=0"
+            return {
+                "series_id": s["id"],
+                "chapter_id": latest["id"],
+                "chapter_label": latest["label"],
+                "url": url,
+            }
+    raise HTTPException(404, "series not found")
 
 
 @app.get("/api/series/{series_id}/continue")
@@ -468,10 +524,20 @@ def series_cover(series_id: str):
     names = _list_images(first_chapter["path"])
     if not names:
         raise HTTPException(404, "no cover image")
-    with zipfile.ZipFile(first_chapter["path"]) as zf:
-        data = zf.read(names[0])
-    ext = os.path.splitext(names[0])[1].lower()
-    return Response(content=data, media_type=IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream"))
+
+    try:
+        source_mtime = os.path.getmtime(first_chapter["path"])
+    except OSError:
+        source_mtime = 0
+
+    cached = _cover_cache.get(series_id)
+    if cached and cached[0] == source_mtime:
+        data, media_type = cached[1], cached[2]
+    else:
+        data, media_type = _generate_cover_bytes(first_chapter["path"], names[0])
+        _cover_cache[series_id] = (source_mtime, data, media_type)
+
+    return Response(content=data, media_type=media_type)
 
 
 @app.get("/api/chapters/{chapter_id}/pages")
