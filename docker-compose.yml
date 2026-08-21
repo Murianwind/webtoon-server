@@ -4,10 +4,9 @@
 # 아래에서 "# <-- 여기 수정" 표시가 붙은 줄만 실제 값으로 고치면 바로 씁니다.
 # 별도로 .env 파일이나 Portainer의 Environment variables를 채울 필요가 없습니다.
 #
-# 태그(화면에 표시되는 웹툰 사이트 이름) 규칙: 위 volumes로 넘긴 폴더 바로 아래에 있는
-# 하위 폴더명이 곧 태그입니다. 폴더명이 이미 깔끔하면(naver, kakao 등) 아무것도 안 해도
-# 되고, 폴더명이 지저분하면 아래 PLATFORM_LABELS로 원하는 이름을 지정하세요.
-# 자세한 설명은 README의 "웹툰 사이트 태그 이름 정하기"를 참고하세요.
+# 태그(화면에 표시되는 웹툰 사이트 이름) 규칙: volumes 한 줄이 폴더 하나이고, 콜론(:)
+# 오른쪽의 /library/<이름>이 그대로 화면에 표시되는 태그입니다. 원하는 이름으로
+# 자유롭게 지으면 됩니다. 필요한 만큼 줄을 추가/삭제하세요.
 #
 # 자동 업데이트: webtoon-server의 labels에 있는
 # com.centurylinklabs.watchtower.enable=true 는 Watchtower용 표시입니다. 이미
@@ -23,13 +22,13 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
-      - "8000:8000"                                    # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
+      - "8000:8000"                                     # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
     environment:
-      - "PUBLIC_BASE_URL="                              # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
-      - "RESCAN_INTERVAL_SECONDS=7200"                  # <-- 여기 수정(선택): 자동 재스캔 주기(초)
-      - 'PLATFORM_LABELS={}'                            # <-- 여기 수정(선택): 폴더명 대신 보여줄 태그, 예) {"kakao_dl":"카카오웹툰"}
+      - "PUBLIC_BASE_URL="                               # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
+      - "RESCAN_INTERVAL_SECONDS=7200"                   # <-- 여기 수정(선택): 자동 재스캔 주기(초)
     volumes:
-      - "/path/to/your/webtoons:/library"               # <-- 여기 수정: 웹툰들이 모여있는 상위 폴더 경로
+      - "/path/to/your/naver-webtoons:/library/naver"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
+      - "/path/to/your/kakao-webtoons:/library/kakao"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
       - "webtoon_data:/data"
     restart: unless-stopped
 

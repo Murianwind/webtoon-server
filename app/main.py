@@ -7,7 +7,6 @@ import datetime
 import io
 import asyncio
 import logging
-import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
@@ -21,29 +20,6 @@ log = logging.getLogger("webtoon-server")
 # 라이브러리 루트: 이 폴더 바로 아래 1depth = 플랫폼(naver/kakao 등),
 # 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차
 LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
-
-# 폴더명(=/library 바로 아래 폴더 이름)을 화면에 다른 이름으로 보여주고 싶을 때 쓰는 매핑.
-# 예: PLATFORM_LABELS={"kakao":"카카오웹툰","naver":"네이버웹툰"}
-# 매핑에 없는 폴더는 폴더명 그대로 표시된다. 마운트를 어떤 방식으로 했든(폴더 하나씩이든,
-# 상위 폴더 통째로든) 동일하게 적용된다.
-def _parse_platform_labels(raw: str) -> dict:
-    if not raw.strip():
-        return {}
-    try:
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("PLATFORM_LABELS는 JSON 객체여야 합니다")
-        return {str(k): str(v) for k, v in data.items()}
-    except Exception as e:
-        log.warning(f"PLATFORM_LABELS 파싱 실패, 무시하고 폴더명을 그대로 씁니다: {e}")
-        return {}
-
-
-PLATFORM_LABELS = _parse_platform_labels(os.environ.get("PLATFORM_LABELS", ""))
-
-
-def platform_label(platform: str) -> str:
-    return PLATFORM_LABELS.get(platform, platform)
 
 # 읽음 진행률을 저장하는 SQLite 파일 (컨테이너 재시작에도 남도록 볼륨 마운트 필요)
 DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
@@ -406,7 +382,6 @@ def list_series():
             {
                 "id": s["id"],
                 "platform": s["platform"],
-                "platform_label": platform_label(s["platform"]),
                 "title": s["title"],
                 "chapter_count": total,
                 "unread_count": unread,
@@ -578,7 +553,6 @@ def list_chapters(series_id: str):
     return {
         "id": s["id"],
         "platform": s["platform"],
-        "platform_label": platform_label(s["platform"]),
         "title": s["title"],
         "chapters": chapters_out,
     }

@@ -23,8 +23,8 @@ zip으로 저장해둔 웹툰 회차를 폴더 기반으로 인식해서, 세로
 ## 폴더 구조 규칙
 
 ```
-웹툰들이 모여있는 상위 폴더 (예: D:\Webtoons)
- ├ naver/                 ← 사이트별 폴더 = 화면에 표시되는 태그
+컨테이너 안 /library
+ ├ naver/                 ← docker-compose.yml의 volumes에서 정한 이름 = 화면에 표시되는 태그
  │   └ 어떤 웹툰 제목/       ← 시리즈 폴더 = 웹툰 한 편
  │       ├ 103 ... 100화 - ...zip
  │       └ 104 ... 번외편 ...zip
@@ -33,11 +33,6 @@ zip으로 저장해둔 웹툰 회차를 폴더 기반으로 인식해서, 세로
          ├ 0003_프롤로그#48.zip
          └ 0004_1화#64.zip
 ```
-
-**태그 규칙은 하나뿐입니다: 사이트별 폴더명이 곧 화면에 표시되는 태그입니다.**
-폴더명이 이미 깔끔하면(`naver`, `kakao` 등) 아무것도 할 필요 없고, 폴더명이
-`kakao_dl_backup` 같이 지저분하면 `PLATFORM_LABELS` 환경변수로 원하는 이름을
-따로 지정하면 됩니다. 자세한 내용은 아래 "웹툰 사이트 태그 이름 정하기" 참고.
 
 - 회차 정렬은 zip 파일명 맨 앞 숫자 기준
 - 표시 라벨은 파일명에서 "N화" 패턴을 찾아 사용, 없으면 파일명에서 앞 번호만 제거해서 사용
@@ -58,13 +53,13 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
-      - "8000:8000"                                    # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
+      - "8000:8000"                                     # <-- 여기 수정: 왼쪽 숫자만 원하는 포트로
     environment:
-      - "PUBLIC_BASE_URL="                              # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
-      - "RESCAN_INTERVAL_SECONDS=7200"                  # <-- 여기 수정(선택): 자동 재스캔 주기(초)
-      - 'PLATFORM_LABELS={}'                            # <-- 여기 수정(선택): 폴더명 대신 보여줄 태그, 예) {"kakao_dl":"카카오웹툰"}
+      - "PUBLIC_BASE_URL="                               # <-- 여기 수정(선택): 외부 알림 링크가 필요할 때만 도메인 입력
+      - "RESCAN_INTERVAL_SECONDS=7200"                   # <-- 여기 수정(선택): 자동 재스캔 주기(초)
     volumes:
-      - "/path/to/your/webtoons:/library"               # <-- 여기 수정: 웹툰들이 모여있는 상위 폴더 경로
+      - "/path/to/your/naver-webtoons:/library/naver"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
+      - "/path/to/your/kakao-webtoons:/library/kakao"    # <-- 여기 수정: 실제 웹툰 폴더 경로, 오른쪽 이름이 태그
       - "webtoon_data:/data"
     restart: unless-stopped
 
@@ -72,12 +67,27 @@ volumes:
   webtoon_data:
 ```
 
-`/path/to/your/webtoons` 자리에 실제로 웹툰 사이트별 폴더들이 들어있는 **상위 폴더 하나**를
-지정하면 됩니다. 예를 들어 `D:\Webtoons\naver\`, `D:\Webtoons\kakao\`처럼 정리되어 있다면
-`D:/Webtoons`를 그대로 적으면 됩니다.
+**`volumes` 한 줄 = 웹툰 사이트 하나.** 콜론(`:`) **왼쪽**은 내 컴퓨터에 실제로 있는
+웹툰 폴더 경로, **오른쪽**(`/library/` 뒤)은 화면에 그대로 표시되는 태그 이름입니다.
+오른쪽 이름은 완전히 자유롭게 지어도 됩니다.
 
-이 폴더들이 서로 다른 위치에 흩어져 있어서 상위 폴더로 한 번에 묶을 수 없다면, 아래
-"폴더가 흩어져 있는 경우"를 참고해서 `volumes`를 여러 줄로 바꾸세요.
+예를 들어 카카오웹툰을 `D:/Downloads/Webtoon/카카오 웹툰` 폴더에 받아두셨다면:
+
+```
+- "D:/Downloads/Webtoon/카카오 웹툰:/library/카카오"
+```
+
+이렇게 적으면 화면에 "카카오"라는 태그로 표시됩니다.
+
+사이트가 두 개보다 많거나 적으면, `volumes`에 줄을 자유롭게 추가/삭제하면 됩니다:
+
+```yaml
+    volumes:
+      - "/path/to/naver-webtoons:/library/naver"
+      - "/path/to/kakao-webtoons:/library/카카오"
+      - "/path/to/lezhin-webtoons:/library/레진"       # 원하는 만큼 추가
+      - "webtoon_data:/data"
+```
 
 배포 후 `http://localhost:8000` (또는 위에서 바꾼 포트) 접속.
 
@@ -92,39 +102,6 @@ volumes:
 
 라이브러리 재스캔은 기본 2시간마다 자동으로 돌고, 바로 반영하고 싶으면 목록 화면
 우측 상단 새로고침 버튼(또는 `POST /api/rescan`)을 누르면 됩니다.
-
-## 웹툰 사이트 태그 이름 정하기
-
-**규칙은 하나뿐입니다: `volumes`로 넘긴 폴더 바로 아래에 있는 하위 폴더명이 곧 태그입니다.**
-마운트를 어떤 방식으로 했든(상위 폴더 통째로든, 폴더 하나씩이든) 항상 똑같이 적용됩니다.
-
-- **폴더명이 이미 깔끔하다** (`naver`, `kakao`처럼) → 그대로 그 이름이 태그로 표시됩니다.
-  아무것도 안 해도 됩니다.
-- **폴더명이 지저분하다** (`kakao_dl_backup`처럼) → `PLATFORM_LABELS`에 그 폴더명을 원하는
-  이름으로 매핑해주면, 폴더명 대신 그 이름이 태그로 표시됩니다.
-
-```yaml
-environment:
-  - 'PLATFORM_LABELS={"kakao_dl_backup":"카카오웹툰","naver_dl":"네이버웹툰"}'
-```
-
-매핑에 없는 폴더는 그냥 폴더명 그대로 표시됩니다. 즉 일부 폴더만 골라서 이름을
-바꿔줘도 되고, 아예 안 써도 됩니다.
-
-### 폴더가 흩어져 있는 경우
-
-사이트별 폴더가 한 상위 폴더 아래 모여있지 않고 서로 다른 위치에 있다면(예: 네이버는
-D드라이브, 카카오는 다른 폴더), `volumes`를 상위 폴더 한 줄 대신 폴더별로 여러 줄 적고
-오른쪽 이름을 직접 원하는 대로 지정하면 됩니다 — 이 경우엔 오른쪽 이름 자체가 태그가
-되니 `PLATFORM_LABELS`가 필요 없습니다.
-
-```yaml
-    volumes:
-      - "/path/to/naver-webtoons:/library/naver"
-      - "/path/to/kakao-webtoons:/library/카카오"
-      - "/path/to/lezhin-webtoons:/library/레진"       # 원하는 만큼 추가
-      - "webtoon_data:/data"
-```
 
 ## 라이선스
 

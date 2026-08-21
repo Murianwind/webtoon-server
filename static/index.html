@@ -144,7 +144,7 @@ function render() {
     card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${s.platform_label}</span>
+        <span class="platform-tag">${s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
         <button class="select-toggle" title="읽음 상태 관리용 선택" aria-label="읽음 상태 관리용 선택">${isSelected ? "●" : "○"}</button>
