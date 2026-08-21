@@ -55,6 +55,34 @@ a {
   color: var(--text);
 }
 
+.rescan-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rescan-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.rescan-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.rescan-btn.spinning {
+  animation: rescan-spin 0.8s linear infinite;
+}
+@keyframes rescan-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* ---------- 검색/정렬 툴바 (index.html) ---------- */
 
 .toolbar {

@@ -134,6 +134,41 @@ function scheduleSaveProgress() {
   }, 1200);
 }
 
+// ---------------------------------------------------------------------
+// 프리페치 (다음 화 이미지를 미리 브라우저 캐시에 받아둠)
+// ---------------------------------------------------------------------
+
+const PREFETCH_PAGE_LIMIT = 6; // 다음 화 앞부분 몇 장만 미리 받음 (데이터 절약)
+const prefetchedChapterIds = new Set();
+
+function prefetchImages(urls) {
+  for (const url of urls) {
+    const img = new Image();
+    img.fetchPriority = "low"; // 지금 보고 있는 화면의 로딩을 방해하지 않도록
+    img.src = url;
+  }
+}
+
+async function prefetchNextChapter(afterChapterId) {
+  const idx = chapterIndexById(afterChapterId);
+  const next = idx >= 0 ? seriesData.chapters[idx + 1] : null;
+  if (!next || prefetchedChapterIds.has(next.id)) return;
+  prefetchedChapterIds.add(next.id);
+
+  try {
+    const res = await fetch(`/api/chapters/${encodeURIComponent(next.id)}/pages`);
+    const data = await res.json();
+    const pageCount = Math.min(data.page_count || 0, PREFETCH_PAGE_LIMIT);
+    const urls = [];
+    for (let i = 0; i < pageCount; i++) {
+      urls.push(`/api/chapters/${encodeURIComponent(next.id)}/pages/${i}`);
+    }
+    prefetchImages(urls);
+  } catch (e) {
+    prefetchedChapterIds.delete(next.id); // 실패하면 나중에 다시 시도할 수 있게
+  }
+}
+
 async function appendChapter(chapter, { scrollToPage = null } = {}) {
   loadMoreObserver.disconnect();
 
@@ -181,6 +216,7 @@ async function appendChapter(chapter, { scrollToPage = null } = {}) {
   const hasNext = idx >= 0 && idx < seriesData.chapters.length - 1;
   if (hasNext && lastImg) {
     loadMoreObserver.observe(lastImg);
+    prefetchNextChapter(chapter.id); // 지금 화가 화면에 붙는 즉시 다음 화 앞부분을 미리 받아둠
   } else if (!hasNext) {
     appendEndCard();
   }

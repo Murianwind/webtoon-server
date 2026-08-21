@@ -5,6 +5,7 @@ import hashlib
 import sqlite3
 import datetime
 import io
+import asyncio
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
@@ -22,6 +23,9 @@ DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
 # 외부(디스코드 등)에 공개되는 URL을 만들 때 쓰는 기준 주소.
 # 예: https://komga.murian.ddnsfree.com (Komga가 쓰던 도메인을 그대로 재사용)
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# 라이브러리 자동 재스캔 주기(초). 0 이하로 설정하면 자동 재스캔을 끈다.
+RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "300"))
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 IMAGE_MEDIA_TYPES = {
@@ -265,10 +269,24 @@ def scan_library():
 
 
 @app.on_event("startup")
-def startup_scan():
+async def startup_scan():
     s, c = scan_library()
     _catalog["series"] = s
     _catalog["chapters"] = c
+    if RESCAN_INTERVAL_SECONDS > 0:
+        asyncio.create_task(_auto_rescan_loop())
+
+
+async def _auto_rescan_loop():
+    while True:
+        await asyncio.sleep(RESCAN_INTERVAL_SECONDS)
+        try:
+            s, c = scan_library()
+            _catalog["series"] = s
+            _catalog["chapters"] = c
+        except Exception:
+            # 한 번 실패해도 다음 주기에 다시 시도 - 서버가 죽으면 안 됨
+            pass
 
 
 @app.post("/api/rescan")

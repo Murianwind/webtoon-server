@@ -9,6 +9,7 @@
 <body>
 <header class="topbar">
   <h1>내 웹툰</h1>
+  <button id="rescanBtn" class="rescan-btn" title="새로고침(재스캔)" aria-label="재스캔">⟳</button>
 </header>
 <div class="toolbar">
   <input id="searchInput" class="search-input" type="text" placeholder="제목 검색">
@@ -345,6 +346,22 @@ sortSelect.addEventListener("change", (e) => {
   sortMode = e.target.value;
   localStorage.setItem(LS_SORT, sortMode);
   render();
+});
+
+const rescanBtn = document.getElementById("rescanBtn");
+rescanBtn.addEventListener("click", async () => {
+  if (rescanBtn.disabled) return;
+  rescanBtn.disabled = true;
+  rescanBtn.classList.add("spinning");
+  try {
+    await fetch("/api/rescan", { method: "POST" });
+    await load();
+  } catch (e) {
+    // 실패해도 조용히 무시 (다음에 다시 시도 가능)
+  } finally {
+    rescanBtn.disabled = false;
+    rescanBtn.classList.remove("spinning");
+  }
 });
 
 init();
