@@ -35,20 +35,19 @@ const PLATFORM_LABEL = { naver: "네이버", kakao: "카카오" };
 const LS_QUERY = "webtoon:index:query";
 const LS_SORT = "webtoon:index:sort";
 const FILTER_KEY = "status_filter"; // 서버(app_settings)에 저장 -> 모든 기기에서 동일하게 적용
-const FILTER_OPTIONS = [
-  { value: "all", label: "전체" },
+const STATUS_OPTIONS = [
   { value: "unread", label: "읽지 않음" },
   { value: "reading", label: "읽는 중" },
   { value: "done", label: "완독" },
 ];
+const STATUS_VALUES = STATUS_OPTIONS.map((o) => o.value);
 
 let allSeries = [];
 let query = localStorage.getItem(LS_QUERY) || "";
 let sortMode = localStorage.getItem(LS_SORT) || "latest";
-let filterMode = "all"; // 서버에서 로드되기 전까지의 기본값
+let selectedStatuses = new Set(); // 비어있으면 "전체" (서버에서 로드되기 전까지의 기본값)
 
-let selectedSeriesId = null;
-let selectedSeriesTitle = null;
+let selectedIds = new Set(); // 다중 선택
 let actionMode = null; // null | "chapter-read" | "chapter-unread"
 
 const searchInput = document.getElementById("searchInput");
@@ -70,23 +69,43 @@ function seriesStatus(s) {
   return "reading"; // 일부만 읽음
 }
 
+function saveFilterSetting() {
+  const value = selectedStatuses.size === 0 ? "all" : [...selectedStatuses].join(",");
+  fetch(`/api/settings/${FILTER_KEY}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  }).catch(() => {});
+}
+
 function renderFilterTabs() {
   const container = document.getElementById("filterTabs");
   container.innerHTML = "";
-  for (const opt of FILTER_OPTIONS) {
+
+  const allBtn = document.createElement("button");
+  allBtn.className = "filter-tab" + (selectedStatuses.size === 0 ? " active" : "");
+  allBtn.textContent = "전체";
+  allBtn.addEventListener("click", () => {
+    if (selectedStatuses.size === 0) return;
+    selectedStatuses = new Set();
+    renderFilterTabs();
+    render();
+    saveFilterSetting();
+  });
+  container.appendChild(allBtn);
+
+  for (const opt of STATUS_OPTIONS) {
     const btn = document.createElement("button");
-    btn.className = "filter-tab" + (filterMode === opt.value ? " active" : "");
+    btn.className = "filter-tab" + (selectedStatuses.has(opt.value) ? " active" : "");
     btn.textContent = opt.label;
     btn.addEventListener("click", () => {
-      if (filterMode === opt.value) return;
-      filterMode = opt.value;
+      if (selectedStatuses.has(opt.value)) selectedStatuses.delete(opt.value);
+      else selectedStatuses.add(opt.value);
+      // 세 상태를 전부 선택한 상태는 "전체"와 같으므로 자연스럽게 합쳐줌
+      if (selectedStatuses.size === STATUS_OPTIONS.length) selectedStatuses = new Set();
       renderFilterTabs();
       render();
-      fetch(`/api/settings/${FILTER_KEY}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value: filterMode }),
-      }).catch(() => {});
+      saveFilterSetting();
     });
     container.appendChild(btn);
   }
@@ -96,15 +115,15 @@ function render() {
   const grid = document.getElementById("grid");
   const q = query.trim().toLowerCase();
   let filtered = q ? allSeries.filter((s) => s.title.toLowerCase().includes(q)) : allSeries;
-  if (filterMode !== "all") {
-    filtered = filtered.filter((s) => seriesStatus(s) === filterMode);
+  if (selectedStatuses.size > 0) {
+    filtered = filtered.filter((s) => selectedStatuses.has(seriesStatus(s)));
   }
   const list = sortSeries(filtered);
 
   if (!list.length) {
     const msg = q
       ? "검색 결과가 없습니다."
-      : filterMode !== "all"
+      : selectedStatuses.size > 0
       ? "해당하는 웹툰이 없습니다."
       : "스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.";
     grid.innerHTML = `<div class="empty-state">${msg}</div>`;
@@ -113,7 +132,7 @@ function render() {
 
   grid.innerHTML = "";
   for (const s of list) {
-    const isSelected = s.id === selectedSeriesId;
+    const isSelected = selectedIds.has(s.id);
     const card = document.createElement("div");
     card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
@@ -121,21 +140,17 @@ function render() {
         <span class="platform-tag">${PLATFORM_LABEL[s.platform] || s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
-        <button class="select-toggle" title="읽음 상태 관리" aria-label="읽음 상태 관리">${isSelected ? "●" : "○"}</button>
+        <button class="select-toggle" title="읽음 상태 관리용 선택" aria-label="읽음 상태 관리용 선택">${isSelected ? "●" : "○"}</button>
       </div>
       <div class="title">${s.title}</div>
       <div class="chapter-count">${s.chapter_count}화</div>
     `;
     card.querySelector(".select-toggle").addEventListener("click", (e) => {
       e.stopPropagation();
-      if (selectedSeriesId === s.id) {
-        deselectSeries();
-      } else {
-        selectedSeriesId = s.id;
-        selectedSeriesTitle = s.title;
-        actionMode = null;
-        renderActionPanel();
-      }
+      if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+      else selectedIds.add(s.id);
+      actionMode = null; // 선택이 바뀌면 4버튼 화면으로 되돌림
+      renderActionPanel();
       render();
     });
     card.addEventListener("click", () => goContinue(s.id));
@@ -156,24 +171,29 @@ async function goContinue(seriesId) {
 }
 
 // ---------------------------------------------------------------------
-// 읽음/안읽음 처리 패널
+// 읽음/안읽음 처리 패널 (여러 웹툰 동시 선택 지원)
 // ---------------------------------------------------------------------
 
-function deselectSeries() {
-  selectedSeriesId = null;
-  selectedSeriesTitle = null;
+function clearSelection() {
+  selectedIds = new Set();
   actionMode = null;
   renderActionPanel();
 }
 
 function renderActionPanel() {
   const panel = document.getElementById("readActionPanel");
-  if (!selectedSeriesId) {
+  if (selectedIds.size === 0) {
     panel.style.display = "none";
     return;
   }
   panel.style.display = "block";
-  document.getElementById("readActionTitle").textContent = selectedSeriesTitle;
+
+  const titles = [...selectedIds]
+    .map((id) => (allSeries.find((s) => s.id === id) || {}).title)
+    .filter(Boolean);
+  document.getElementById("readActionTitle").textContent =
+    titles.length <= 2 ? titles.join(", ") : `${titles.length}개 웹툰 선택됨`;
+
   const body = document.getElementById("readActionBody");
 
   if (!actionMode) {
@@ -189,16 +209,19 @@ function renderActionPanel() {
       btn.addEventListener("click", () => onActionButton(btn.dataset.act));
     }
   } else {
+    // 회차 읽음/안읽음: 선택된 웹툰마다 각자의 회차 목록에서 하나씩 고름
     body.innerHTML = `
       <div class="read-action-picker">
-        <select id="chapterPickerSelect"><option>회차 불러오는 중...</option></select>
+        <div id="pickerList" class="read-action-picker-list">
+          <div class="picker-loading">회차 불러오는 중...</div>
+        </div>
         <div class="read-action-picker-buttons">
           <button id="chapterPickerCancel" class="ghost">뒤로</button>
           <button id="chapterPickerApply">적용</button>
         </div>
       </div>
     `;
-    loadChapterOptions();
+    renderChapterPickers();
     document.getElementById("chapterPickerCancel").addEventListener("click", () => {
       actionMode = null;
       renderActionPanel();
@@ -207,18 +230,36 @@ function renderActionPanel() {
   }
 }
 
-async function loadChapterOptions() {
-  const res = await fetch(`/api/series/${encodeURIComponent(selectedSeriesId)}/chapters`);
-  const data = await res.json();
-  const select = document.getElementById("chapterPickerSelect");
-  if (!select) return; // 그 사이 패널이 닫혔을 수 있음
-  select.innerHTML = data.chapters
-    .map((c) => `<option value="${c.id}">${c.label}${c.read ? " (읽음)" : ""}</option>`)
-    .join("");
+async function renderChapterPickers() {
+  const ids = [...selectedIds];
+  const results = await Promise.all(
+    ids.map((id) =>
+      fetch(`/api/series/${encodeURIComponent(id)}/chapters`).then((r) => r.json())
+    )
+  );
+
+  const listEl = document.getElementById("pickerList");
+  if (!listEl) return; // 그 사이 패널이 닫혔을 수 있음
+
+  listEl.innerHTML = "";
+  results.forEach((data, i) => {
+    const seriesId = ids[i];
+    const row = document.createElement("div");
+    row.className = "read-action-picker-row";
+    row.innerHTML = `
+      <span class="picker-series-title">${data.title}</span>
+      <select data-series-id="${seriesId}">
+        ${data.chapters
+          .map((c) => `<option value="${c.id}">${c.label}${c.read ? " (읽음)" : ""}</option>`)
+          .join("")}
+      </select>
+    `;
+    listEl.appendChild(row);
+  });
 }
 
-async function putReadState(body) {
-  await fetch(`/api/series/${encodeURIComponent(selectedSeriesId)}/read-state`, {
+async function putReadState(seriesId, body) {
+  await fetch(`/api/series/${encodeURIComponent(seriesId)}/read-state`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -227,8 +268,11 @@ async function putReadState(body) {
 
 async function onActionButton(act) {
   if (act === "all-read" || act === "all-unread") {
-    await putReadState({ scope: "all", read: act === "all-read" });
-    deselectSeries();
+    const read = act === "all-read";
+    await Promise.all(
+      [...selectedIds].map((id) => putReadState(id, { scope: "all", read }))
+    );
+    clearSelection();
     await load();
   } else {
     actionMode = act;
@@ -237,15 +281,19 @@ async function onActionButton(act) {
 }
 
 async function applyChapterAction() {
-  const select = document.getElementById("chapterPickerSelect");
-  if (!select || !select.value) return;
   const read = actionMode === "chapter-read";
-  await putReadState({ scope: "chapter", chapter_id: select.value, read });
-  deselectSeries();
+  const selects = document.querySelectorAll("#pickerList select[data-series-id]");
+  const tasks = [];
+  for (const sel of selects) {
+    if (!sel.value) continue;
+    tasks.push(putReadState(sel.dataset.seriesId, { scope: "chapter", chapter_id: sel.value, read }));
+  }
+  await Promise.all(tasks);
+  clearSelection();
   await load();
 }
 
-document.getElementById("readActionClose").addEventListener("click", deselectSeries);
+document.getElementById("readActionClose").addEventListener("click", clearSelection);
 
 // ---------------------------------------------------------------------
 // 로딩 & 검색/정렬 (localStorage에 유지)
@@ -255,8 +303,9 @@ async function loadFilterSetting() {
   try {
     const res = await fetch(`/api/settings/${FILTER_KEY}`);
     const data = await res.json();
-    if (data.value && FILTER_OPTIONS.some((o) => o.value === data.value)) {
-      filterMode = data.value;
+    if (data.value && data.value !== "all") {
+      const parts = data.value.split(",").filter((v) => STATUS_VALUES.includes(v));
+      selectedStatuses = new Set(parts);
     }
   } catch (e) {
     // 실패 시 기본값(전체) 유지
