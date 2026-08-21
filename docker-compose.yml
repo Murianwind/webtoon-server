@@ -1,7 +1,6 @@
 services:
   webtoon-server:
     build: .
-    image: webtoon-server:latest
     container_name: webtoon-server
     ports:
       - "25600:8000"
