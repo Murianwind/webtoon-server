@@ -1,0 +1,221 @@
+"""
+파일시스템에서 웹툰 라이브러리를 스캔하고, zip 파일명에서 (정렬키, 회차 라벨)을 뽑아낸다.
+
+라이브러리 구조: LIBRARY_ROOT 바로 아래 1depth = 플랫폼(예: 네이버/카카오),
+그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차.
+"""
+
+import hashlib
+import os
+import re
+import zipfile
+
+from . import db
+
+LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def natural_key(name: str):
+    """zip 내부 이미지 파일명을 1,2,3...10 순서로(문자열 사전순이 아니라) 정렬하기 위한 키."""
+    return [int(token) if token.isdigit() else token.lower() for token in re.split(r"(\d+)", name)]
+
+
+def make_id(*parts: str) -> str:
+    return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _clean_title(text: str, strip_trailing_hash: bool = True) -> str:
+    """추출된 제목 후보에서 구분자/완결표시/날짜형 숫자/장식성 특수문자를 정리."""
+    # 앞뒤에 붙는 구분자류 제거 (마커 앞/뒤 어느 쪽 텍스트든 동일하게 적용)
+    text = re.sub(r"^[\s\-–—.:：·‧․・,]+", "", text)
+    text = re.sub(r"[\s\-–—.:：·‧․・,]+$", "", text)
+    if strip_trailing_hash:
+        # 카카오식 파일명 끝의 #숫자(회차 제목과 무관한 부가 번호) 제거
+        text = re.sub(r"#\d+$", "", text)
+    # 완결 표시 제거
+    text = re.sub(r"\(完\)|\(완\)|완결", "", text)
+    # 날짜로 추정되는 "숫자-숫자" 패턴 제거 (예: 6-28)
+    text = re.sub(r"\b\d{1,2}-\d{1,2}\b", "", text)
+    # 장식성 특수문자 제거 (단어 사이에 있을 수 있으니 공백으로 치환 후 나중에 정리)
+    text = re.sub(r"[？！～·‧․・•●○◆■□※]", " ", text)
+    # 끝에 남은 "(숫자)"는 " 숫자"로 (예: (2) -> " 2")
+    text = re.sub(r"\((\d+)\)\s*$", r" \1", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_")
+    return text
+
+
+_SEPARATOR_CLASS = r"[\s：:\-–—·‧․・,]*"
+
+
+def _series_prefix_length(content: str, series_name: str) -> int:
+    """
+    content가 series_name으로 시작하면 그 길이를 반환(없으면 0).
+    "：" vs 공백처럼 구두점/공백 표기가 실제 파일명과 달라도 매칭되도록,
+    시리즈명을 구분자 기준으로 쪼갠 뒤 구분자 자리는 느슨하게(0개 이상) 허용한다.
+    """
+    if not series_name:
+        return 0
+    parts = [p for p in re.split(r"[\s：:\-–—·‧․・,]+", series_name) if p]
+    if not parts:
+        return 0
+    pattern = r"^" + _SEPARATOR_CLASS.join(re.escape(p) for p in parts) + _SEPARATOR_CLASS
+    match = re.match(pattern, content)
+    if match and match.end() > 0:
+        return match.end()
+    return 0
+
+
+def parse_chapter_label(stem: str, series_name: str = "") -> tuple[int, str]:
+    """
+    zip 파일명(확장자 제외)에서 (정렬키, 표시라벨) 추출.
+
+    예)
+      "103 마법사랑해 100화 - 아스라이 스러지는 (7)" -> (103, "100화 · 아스라이 스러지는 7")
+      "172 나이트런 Extra story - 1화" (series=나이트런) -> (172, "Extra story 1화")
+      "651 신의 탑 3부 233화" (series=신의 탑)          -> (651, "3부 233화")
+      "0004_1화#64"                                  -> (4,   "1화")
+      "0003_프롤로그#48"                              -> (3,   "프롤로그")
+      "104 마법사랑해 번외편 - 르네의 일기"           -> (104, "번외편 - 르네의 일기")
+      "117 기기괴괴2 절멸의 도시 #2" (series=기기괴괴2) -> (117, "절멸의 도시 2")
+      "017 로도스도 전기  사령의 여왕 제16화 ..." (series="로도스도 전기 ： 사령의 여왕")
+                                                     -> (17, "16화 · ...")
+    """
+    sort_match = re.match(r"^(\d+)", stem)
+    sort_key = int(sort_match.group(1)) if sort_match else 0
+
+    # 맨 앞 정렬번호 뒤 구분자(_ 또는 공백)로 카카오식/네이버식을 구분
+    # 카카오: "0004_1화#64" (언더스코어), 네이버: "103 마법사랑해 ..." (공백)
+    is_underscore_style = bool(re.match(r"^\d+_", stem))
+
+    rest = re.sub(r"^\d+[_\s]*", "", stem)
+
+    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록).
+    # 폴더명과 파일명의 구두점 표기가 달라도(예: "：" vs 공백) 매칭되도록 느슨하게 비교.
+    content = rest
+    prefix_length = _series_prefix_length(rest, series_name)
+    if prefix_length:
+        content = rest[prefix_length:]
+
+    # "화" 앞에 "제"가 붙는 표기("제16화")는 "제"를 회차 번호의 일부로 취급해서
+    # 부제 프리픽스에 안 남게 함
+    marker_match = re.search(r"(?:제\s*)?(\d+\s*화)", content)
+    if marker_match:
+        marker = marker_match.group(1).replace(" ", "")
+        # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
+        prefix = _clean_title(content[: marker_match.start()], strip_trailing_hash=False)
+        suffix = _clean_title(content[marker_match.end():])
+        label = f"{prefix} {marker}" if prefix else marker
+        if suffix:
+            label = f"{label} · {suffix}"
+        return sort_key, label
+
+    if not is_underscore_style:
+        # "N화" 표시가 없는 네이버식 파일명: "부제목 #번호" 패턴 시도 (예: 기기괴괴2)
+        hash_matches = list(re.finditer(r"#(\d+)", content))
+        if hash_matches:
+            last_hash_match = hash_matches[-1]
+            number = last_hash_match.group(1)
+            title_part = _clean_title(content[: last_hash_match.start()], strip_trailing_hash=False)
+            if title_part:
+                return sort_key, f"{title_part} {number}"
+
+    # 그 외: "화" 표시도 "#번호"도 없는 경우 (예: 번외편)
+    label = _clean_title(content, strip_trailing_hash=True)
+    if not label:
+        label = stem
+    return sort_key, label
+
+
+def list_all_series_folders() -> list[dict]:
+    """디스크상에 있는 (zip이 하나라도 있는) 모든 (platform, series) 폴더 목록.
+    제외 여부와 무관하게 전부 보여준다 - 제외됐던 걸 다시 추가할 때 필요."""
+    result = []
+    if not os.path.isdir(LIBRARY_ROOT):
+        return result
+    for platform in sorted(os.listdir(LIBRARY_ROOT)):
+        platform_path = os.path.join(LIBRARY_ROOT, platform)
+        if not os.path.isdir(platform_path):
+            continue
+        for series_name in sorted(os.listdir(platform_path)):
+            series_path = os.path.join(platform_path, series_name)
+            if not os.path.isdir(series_path):
+                continue
+            has_zip = any(f.lower().endswith(".zip") for f in os.listdir(series_path))
+            if has_zip:
+                result.append({"platform": platform, "series": series_name})
+    return result
+
+
+def scan_library() -> tuple[dict, dict]:
+    """LIBRARY_ROOT를 스캔해서 (series_map, chapters_map)을 반환.
+    db.get_excluded_series()에 있는 (platform, series) 조합은 건너뛴다."""
+    series_map = {}
+    chapters_map = {}
+
+    if not os.path.isdir(LIBRARY_ROOT):
+        return series_map, chapters_map
+
+    excluded = db.get_excluded_series()
+
+    for platform in sorted(os.listdir(LIBRARY_ROOT)):
+        platform_path = os.path.join(LIBRARY_ROOT, platform)
+        if not os.path.isdir(platform_path):
+            continue
+
+        for series_name in sorted(os.listdir(platform_path)):
+            if (platform, series_name) in excluded:
+                continue
+
+            series_path = os.path.join(platform_path, series_name)
+            if not os.path.isdir(series_path):
+                continue
+
+            zip_filenames = [f for f in os.listdir(series_path) if f.lower().endswith(".zip")]
+            if not zip_filenames:
+                continue
+
+            series_id = make_id(platform, series_name)
+            chapters = []
+            for zip_filename in zip_filenames:
+                stem = zip_filename[:-4]
+                sort_key, label = parse_chapter_label(stem, series_name)
+                chapter_id = make_id(platform, series_name, zip_filename)
+                full_path = os.path.join(series_path, zip_filename)
+                chapters.append(
+                    {
+                        "id": chapter_id,
+                        "label": label,
+                        "sort_key": sort_key,
+                        "filename": zip_filename,
+                        "path": full_path,
+                    }
+                )
+                chapters_map[chapter_id] = full_path
+
+            chapters.sort(key=lambda chapter: (chapter["sort_key"], chapter["filename"]))
+            latest_mtime = max((os.path.getmtime(chapter["path"]) for chapter in chapters), default=0)
+
+            series_map[series_id] = {
+                "id": series_id,
+                "platform": platform,
+                "title": series_name,
+                "path": series_path,
+                "chapters": chapters,
+                "latest_mtime": latest_mtime,
+            }
+
+    return series_map, chapters_map
+
+
+def list_zip_image_names(zip_path: str) -> list[str]:
+    """zip 안의 이미지 파일명을 자연 정렬 순서(1,2,3...10)로 반환."""
+    with zipfile.ZipFile(zip_path) as zf:
+        names = [
+            name
+            for name in zf.namelist()
+            if not name.endswith("/") and os.path.splitext(name)[1].lower() in IMAGE_EXTS
+        ]
+    names.sort(key=natural_key)
+    return names

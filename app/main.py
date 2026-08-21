@@ -1,456 +1,90 @@
-import os
-import re
-import zipfile
-import hashlib
-import sqlite3
-import datetime
-import io
+"""
+webtoon-server FastAPI 앱.
+
+이 파일은 라우트 정의와 앱 생명주기(시작 시 스캔, 자동 재스캔 루프)만 담당한다.
+실제 로직은 각자 책임이 분리된 모듈에 있다:
+  - db.py       읽음 진행률 / 설정 / 제외목록 / 겹침캐시 / 백업·복원 (SQLite)
+  - catalog.py  스캔 결과를 담아두는 메모리 상태
+  - scan.py     파일시스템 스캔 + 회차 라벨 파싱
+  - overlap.py  화 전환 겹침(리캡) 감지 + 백그라운드 사전계산
+  - covers.py   시리즈 커버 썸네일 생성/캐싱
+"""
+
 import asyncio
-import logging
 import json
+import logging
+import os
+import zipfile
+from datetime import date, datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from PIL import Image
-import numpy as np
-import cv2
+
+from . import catalog, covers, db, overlap, scan
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webtoon-server")
 
-# 라이브러리 루트: 이 폴더 바로 아래 1depth = 플랫폼(naver/kakao 등),
-# 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차
-LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
-
-# 읽음 진행률을 저장하는 SQLite 파일 (컨테이너 재시작에도 남도록 볼륨 마운트 필요)
-DB_PATH = os.environ.get("DB_PATH", "/data/progress.db")
-
-# 외부(디스코드 등)에 공개되는 URL을 만들 때 쓰는 기준 주소.
-# 예: https://your-domain.example.com
+# 외부(디스코드 등)에 공개되는 URL을 만들 때 쓰는 기준 주소. 예: https://your-domain.example.com
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
 # 라이브러리 자동 재스캔 주기(초). 기본 2시간. 0 이하로 설정하면 자동 재스캔을 끈다.
 RESCAN_INTERVAL_SECONDS = int(os.environ.get("RESCAN_INTERVAL_SECONDS", "7200"))
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-IMAGE_MEDIA_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
+BACKUP_VERSION = 1
 
 app = FastAPI(title="webtoon-server")
 
-# ---------------------------------------------------------------------------
-# 유틸
-# ---------------------------------------------------------------------------
 
+def _chapter_number_part(label: str) -> str:
+    """라벨에서 제목 부분(' · ' 뒤)을 떼고 회차 번호 부분만 반환."""
+    return label.split(" · ", 1)[0]
 
-def natural_key(s: str):
-    """zip 내부 이미지 파일명을 1,2,3...10 순서로 정렬하기 위한 키"""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
+def _log_scan_result(prefix: str, series_map: dict, chapters_map: dict, added: int | None = None, removed: int | None = None) -> None:
+    if added is None:
+        log.info(f"{prefix} - 시리즈 {len(series_map)}개, 회차 {len(chapters_map)}개")
+    elif added or removed:
+        log.info(f"{prefix} - 시리즈 {len(series_map)}개 (신규 {added}, 제거 {removed}), 회차 {len(chapters_map)}개")
+    else:
+        log.info(f"{prefix} - 변경 없음 (시리즈 {len(series_map)}개, 회차 {len(chapters_map)}개)")
 
-def make_id(*parts: str) -> str:
-    return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()[:12]
 
-
-def _clean_title(text: str, strip_trailing_hash: bool = True) -> str:
-    """추출된 제목 후보에서 구분자/완결표시/날짜형 숫자/장식성 특수문자를 정리."""
-    # 앞뒤에 붙는 구분자류 제거 (마커 앞/뒤 어느 쪽 텍스트든 동일하게 적용)
-    text = re.sub(r"^[\s\-–—.:：·‧․・,]+", "", text)
-    text = re.sub(r"[\s\-–—.:：·‧․・,]+$", "", text)
-    if strip_trailing_hash:
-        # 카카오식 파일명 끝의 #숫자(회차 제목과 무관한 부가 번호) 제거
-        text = re.sub(r"#\d+$", "", text)
-    # 완결 표시 제거
-    text = re.sub(r"\(完\)|\(완\)|완결", "", text)
-    # 날짜로 추정되는 "숫자-숫자" 패턴 제거 (예: 6-28)
-    text = re.sub(r"\b\d{1,2}-\d{1,2}\b", "", text)
-    # 장식성 특수문자 제거 (단어 사이에 있을 수 있으니 공백으로 치환 후 나중에 정리)
-    text = re.sub(r"[？！～·‧․・•●○◆■□※]", " ", text)
-    # 끝에 남은 "(숫자)"는 " 숫자"로 (예: (2) -> " 2")
-    text = re.sub(r"\((\d+)\)\s*$", r" \1", text)
-    text = re.sub(r"\s+", " ", text).strip(" -_")
-    return text
-
-
-_SEPARATOR_CLASS = r"[\s：:\-–—·‧․・,]*"
-
-
-def _series_prefix_end(content: str, series_name: str) -> int:
-    """
-    content가 series_name으로 시작하면 그 길이를 반환(없으면 0).
-    "：" vs 공백처럼 구두점/공백 표기가 실제 파일명과 달라도 매칭되도록,
-    시리즈명을 구분자 기준으로 쪼갠 뒤 구분자 자리는 느슨하게(０개 이상) 허용한다.
-    """
-    if not series_name:
-        return 0
-    parts = [p for p in re.split(r"[\s：:\-–—·‧․・,]+", series_name) if p]
-    if not parts:
-        return 0
-    pattern = r"^" + _SEPARATOR_CLASS.join(re.escape(p) for p in parts) + _SEPARATOR_CLASS
-    m = re.match(pattern, content)
-    if m and m.end() > 0:
-        return m.end()
-    return 0
-
-
-def parse_chapter_label(stem: str, series_name: str = ""):
-    """
-    zip 파일명(확장자 제외)에서 (정렬키, 표시라벨) 추출.
-
-    예)
-      "103 마법사랑해 100화 - 아스라이 스러지는 (7)" -> (103, "100화 · 아스라이 스러지는 7")
-      "172 나이트런 Extra story - 1화" (series=나이트런) -> (172, "Extra story 1화")
-      "651 신의 탑 3부 233화" (series=신의 탑)          -> (651, "3부 233화")
-      "0004_1화#64"                                  -> (4,   "1화")
-      "0003_프롤로그#48"                              -> (3,   "프롤로그")
-      "104 마법사랑해 번외편 - 르네의 일기"           -> (104, "번외편 - 르네의 일기")
-      "117 기기괴괴2 절멸의 도시 #2" (series=기기괴괴2) -> (117, "절멸의 도시 2")
-      "017 로도스도 전기  사령의 여왕 제16화 ..." (series="로도스도 전기 ： 사령의 여왕")
-                                                     -> (17, "16화 · ...")
-    """
-    m = re.match(r"^(\d+)", stem)
-    sort_key = int(m.group(1)) if m else 0
-
-    # 맨 앞 정렬번호 뒤 구분자(_ 또는 공백)로 카카오식/네이버식을 구분
-    # 카카오: "0004_1화#64" (언더스코어), 네이버: "103 마법사랑해 ..." (공백)
-    is_underscore_style = bool(re.match(r"^\d+_", stem))
-
-    rest = re.sub(r"^\d+[_\s]*", "", stem)
-
-    # 파일명이 시리즈 폴더명으로 시작하면 그 부분은 제거 (제목 추출에 방해되지 않도록).
-    # 폴더명과 파일명의 구두점 표기가 달라도(예: "：" vs 공백) 매칭되도록 느슨하게 비교.
-    content = rest
-    prefix_end = _series_prefix_end(rest, series_name)
-    if prefix_end:
-        content = rest[prefix_end:]
-
-    # "화" 앞에 "제"가 붙는 표기("제16화")는 "제"를 회차 번호의 일부로 취급해서
-    # 부제 프리픽스에 안 남게 함
-    m2 = re.search(r"(?:제\s*)?(\d+\s*화)", content)
-    if m2:
-        marker = m2.group(1).replace(" ", "")
-        # "화" 앞에 붙는 텍스트(부제/시즌 표시 등)도 그대로 살림 (예: "Extra story", "3부")
-        prefix = _clean_title(content[: m2.start()], strip_trailing_hash=False)
-        suffix = _clean_title(content[m2.end():])
-        label = f"{prefix} {marker}" if prefix else marker
-        if suffix:
-            label = f"{label} · {suffix}"
-        return sort_key, label
-
-    if not is_underscore_style:
-        # "N화" 표시가 없는 네이버식 파일명: "부제목 #번호" 패턴 시도 (예: 기기괴괴2)
-        hash_matches = list(re.finditer(r"#(\d+)", content))
-        if hash_matches:
-            last = hash_matches[-1]
-            number = last.group(1)
-            title_part = _clean_title(content[: last.start()], strip_trailing_hash=False)
-            if title_part:
-                return sort_key, f"{title_part} {number}"
-
-    # 그 외: "화" 표시도 "#번호"도 없는 경우 (예: 번외편)
-    label = _clean_title(content, strip_trailing_hash=True)
-    if not label:
-        label = stem
-    return sort_key, label
-
-
-# ---------------------------------------------------------------------------
-# 읽음 진행률 저장소 (SQLite)
-# ---------------------------------------------------------------------------
-
-
-def _db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS progress (
-            series_id TEXT PRIMARY KEY,
-            chapter_id TEXT NOT NULL,
-            chapter_index INTEGER NOT NULL,
-            page_index INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chapter_overlap (
-            next_chapter_id TEXT PRIMARY KEY,
-            prev_chapter_id TEXT NOT NULL,
-            skip_pages INTEGER NOT NULL,
-            computed_at TEXT NOT NULL
-        )
-        """
-    )
-    return conn
-
-
-def get_progress(series_id: str):
-    conn = _db()
-    try:
-        row = conn.execute(
-            "SELECT chapter_id, chapter_index, page_index FROM progress WHERE series_id = ?",
-            (series_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    return {"chapter_id": row[0], "chapter_index": row[1], "page_index": row[2]}
-
-
-def get_all_progress():
-    conn = _db()
-    try:
-        rows = conn.execute(
-            "SELECT series_id, chapter_id, chapter_index, page_index FROM progress"
-        ).fetchall()
-    finally:
-        conn.close()
-    return {
-        r[0]: {"chapter_id": r[1], "chapter_index": r[2], "page_index": r[3]}
-        for r in rows
-    }
-
-
-def set_progress(series_id: str, chapter_id: str, chapter_index: int, page_index: int):
-    conn = _db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(series_id) DO UPDATE SET
-                chapter_id = excluded.chapter_id,
-                chapter_index = excluded.chapter_index,
-                page_index = excluded.page_index,
-                updated_at = excluded.updated_at
-            """,
-            (series_id, chapter_id, chapter_index, page_index, datetime.datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def delete_progress(series_id: str):
-    conn = _db()
-    try:
-        conn.execute("DELETE FROM progress WHERE series_id = ?", (series_id,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# 기기 상관없이 동일하게 유지되어야 하는 앱 설정 (서버에 저장)
-# ---------------------------------------------------------------------------
-
-
-def get_setting(key: str, default=None):
-    conn = _db()
-    try:
-        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else default
-
-
-def set_setting(key: str, value: str):
-    conn = _db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO app_settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (key, value),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# 시리즈 폴더 스캔 제외 관리 (플랫폼 폴더 안에 섞여 있는 웹툰 아닌 폴더 등을
-# 스캔에서 빼거나 다시 넣을 때 씀). 제외해도 실제 폴더/zip 파일은 절대 건드리지 않는다.
-# ---------------------------------------------------------------------------
-
-EXCLUDED_SERIES_KEY = "excluded_series"
-
-
-def get_excluded_series() -> set:
-    """제외된 (platform, series_name) 튜플 집합."""
-    raw = get_setting(EXCLUDED_SERIES_KEY)
-    if not raw:
-        return set()
-    try:
-        data = json.loads(raw)
-        return {(item["platform"], item["series"]) for item in data if "platform" in item and "series" in item}
-    except Exception:
-        return set()
-
-
-def set_excluded_series(pairs) -> None:
-    data = [{"platform": p, "series": s} for p, s in sorted(pairs)]
-    set_setting(EXCLUDED_SERIES_KEY, json.dumps(data, ensure_ascii=False))
-
-
-def list_all_series_folders():
-    """디스크상에 있는 (zip이 하나라도 있는) 모든 (platform, series) 폴더 목록.
-    제외 여부와 무관하게 전부 보여준다 - 제외됐던 걸 다시 추가할 때 필요."""
-    result = []
-    if not os.path.isdir(LIBRARY_ROOT):
-        return result
-    for platform in sorted(os.listdir(LIBRARY_ROOT)):
-        platform_path = os.path.join(LIBRARY_ROOT, platform)
-        if not os.path.isdir(platform_path):
-            continue
-        for series_name in sorted(os.listdir(platform_path)):
-            series_path = os.path.join(platform_path, series_name)
-            if not os.path.isdir(series_path):
-                continue
-            has_zip = any(f.lower().endswith(".zip") for f in os.listdir(series_path))
-            if has_zip:
-                result.append({"platform": platform, "series": series_name})
-    return result
-
-
-# 회차의 page_index로 이 값이 저장되어 있으면 "그 회차까지 다 읽었다"는 뜻.
-# /continue 조회 시 이 값을 만나면 실제 페이지 수와 비교해 다음 화로 자동 이동시킨다.
-PAGE_FINISHED_SENTINEL = 1_000_000
-
-
-def apply_read_boundary(series_id: str, chapters: list, index: int):
-    """index번째 회차까지(포함) 읽음으로 표시. index가 음수면 전부 안읽음(진행률 삭제)."""
-    if index < 0:
-        delete_progress(series_id)
-        return
-    index = min(index, len(chapters) - 1)
-    chapter = chapters[index]
-    set_progress(series_id, chapter["id"], index, PAGE_FINISHED_SENTINEL)
-
-
-# ---------------------------------------------------------------------------
-# 라이브러리 스캔 (인메모리 카탈로그, 재시작/재스캔 시 갱신)
-# ---------------------------------------------------------------------------
-
-_catalog = {"series": {}, "chapters": {}}
-
-
-def scan_library():
-    series_map = {}
-    chapters_map = {}
-
-    if not os.path.isdir(LIBRARY_ROOT):
-        return series_map, chapters_map
-
-    excluded = get_excluded_series()
-
-    for platform in sorted(os.listdir(LIBRARY_ROOT)):
-        platform_path = os.path.join(LIBRARY_ROOT, platform)
-        if not os.path.isdir(platform_path):
-            continue
-
-        for series_name in sorted(os.listdir(platform_path)):
-            if (platform, series_name) in excluded:
-                continue
-
-            series_path = os.path.join(platform_path, series_name)
-            if not os.path.isdir(series_path):
-                continue
-
-            zip_files = [f for f in os.listdir(series_path) if f.lower().endswith(".zip")]
-            if not zip_files:
-                continue
-
-            series_id = make_id(platform, series_name)
-            chapters = []
-            for fn in zip_files:
-                stem = fn[:-4]
-                sort_key, label = parse_chapter_label(stem, series_name)
-                chapter_id = make_id(platform, series_name, fn)
-                full_path = os.path.join(series_path, fn)
-                chapters.append(
-                    {
-                        "id": chapter_id,
-                        "label": label,
-                        "sort_key": sort_key,
-                        "filename": fn,
-                        "path": full_path,
-                    }
-                )
-                chapters_map[chapter_id] = full_path
-
-            chapters.sort(key=lambda c: (c["sort_key"], c["filename"]))
-            latest_mtime = max((os.path.getmtime(c["path"]) for c in chapters), default=0)
-
-            series_map[series_id] = {
-                "id": series_id,
-                "platform": platform,
-                "title": series_name,
-                "path": series_path,
-                "chapters": chapters,
-                "latest_mtime": latest_mtime,
-            }
-
+def _rescan_and_replace_catalog() -> tuple[dict, dict]:
+    series_map, chapters_map = scan.scan_library()
+    catalog.replace(series_map, chapters_map)
     return series_map, chapters_map
+
+
+# ---------------------------------------------------------------------------
+# 앱 생명주기: 시작 시 스캔, 자동/수동 재스캔
+# ---------------------------------------------------------------------------
 
 
 @app.on_event("startup")
 async def startup_scan():
-    s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
-    log.info(f"라이브러리 스캔 완료 - 시리즈 {len(s)}개, 회차 {len(c)}개 (경로: {LIBRARY_ROOT})")
-    asyncio.create_task(precompute_overlaps())
+    db.init_schema()
+    series_map, chapters_map = _rescan_and_replace_catalog()
+    _log_scan_result(f"라이브러리 스캔 완료 (경로: {scan.LIBRARY_ROOT})", series_map, chapters_map)
+    asyncio.create_task(overlap.precompute_overlaps())
 
     if RESCAN_INTERVAL_SECONDS > 0:
-        minutes = RESCAN_INTERVAL_SECONDS / 60
-        log.info(f"자동 재스캔 활성화 - {minutes:.0f}분마다 실행")
+        log.info(f"자동 재스캔 활성화 - {RESCAN_INTERVAL_SECONDS / 60:.0f}분마다 실행")
         asyncio.create_task(_auto_rescan_loop())
     else:
         log.info("자동 재스캔 비활성화됨 (RESCAN_INTERVAL_SECONDS <= 0)")
-
-
-def _diff_and_apply_scan(s: dict, c: dict) -> tuple[int, int]:
-    """새 스캔 결과를 카탈로그에 반영하고, (신규 시리즈 수, 제거된 시리즈 수)를 반환."""
-    prev_ids = set(_catalog["series"].keys())
-    new_ids = set(s.keys())
-    added = len(new_ids - prev_ids)
-    removed = len(prev_ids - new_ids)
-    _catalog["series"] = s
-    _catalog["chapters"] = c
-    return added, removed
 
 
 async def _auto_rescan_loop():
     while True:
         await asyncio.sleep(RESCAN_INTERVAL_SECONDS)
         try:
-            s, c = scan_library()
-            added, removed = _diff_and_apply_scan(s, c)
-            if added or removed:
-                log.info(f"자동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
-            else:
-                log.info(f"자동 재스캔 완료 - 변경 없음 (시리즈 {len(s)}개, 회차 {len(c)}개)")
-            asyncio.create_task(precompute_overlaps())
+            series_map, chapters_map = scan.scan_library()
+            added, removed = catalog.diff_and_replace(series_map, chapters_map)
+            _log_scan_result("자동 재스캔 완료", series_map, chapters_map, added, removed)
+            asyncio.create_task(overlap.precompute_overlaps())
         except Exception:
             # 한 번 실패해도 다음 주기에 다시 시도 - 서버가 죽으면 안 됨
             log.exception("자동 재스캔 중 오류 발생 - 다음 주기에 재시도")
@@ -458,11 +92,11 @@ async def _auto_rescan_loop():
 
 @app.post("/api/rescan")
 async def rescan():
-    s, c = scan_library()
-    added, removed = _diff_and_apply_scan(s, c)
-    log.info(f"수동 재스캔 완료 - 시리즈 {len(s)}개 (신규 {added}, 제거 {removed}), 회차 {len(c)}개")
-    asyncio.create_task(precompute_overlaps())
-    return {"series_count": len(s)}
+    series_map, chapters_map = scan.scan_library()
+    added, removed = catalog.diff_and_replace(series_map, chapters_map)
+    _log_scan_result("수동 재스캔 완료", series_map, chapters_map, added, removed)
+    asyncio.create_task(overlap.precompute_overlaps())
+    return {"series_count": len(series_map)}
 
 
 # ---------------------------------------------------------------------------
@@ -474,8 +108,8 @@ async def rescan():
 @app.get("/api/series-folders")
 def list_series_folders():
     """디스크상의 모든 시리즈 폴더를 스캔 중/제외됨으로 나눠서 보여준다."""
-    excluded = get_excluded_series()
-    all_folders = list_all_series_folders()
+    excluded = db.get_excluded_series()
+    all_folders = scan.list_all_series_folders()
     return {
         "included": [f for f in all_folders if (f["platform"], f["series"]) not in excluded],
         "excluded": [f for f in all_folders if (f["platform"], f["series"]) in excluded],
@@ -489,230 +123,36 @@ class SeriesFolderRef(BaseModel):
 
 @app.post("/api/series-folders/exclude")
 def exclude_series_folder(body: SeriesFolderRef):
-    excluded = get_excluded_series()
+    excluded = db.get_excluded_series()
     excluded.add((body.platform, body.series))
-    set_excluded_series(excluded)
-
-    s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
+    db.set_excluded_series(excluded)
+    _rescan_and_replace_catalog()
     log.info(f"시리즈 폴더 스캔 제외: {body.platform}/{body.series} (파일은 삭제하지 않음)")
     return {"ok": True}
 
 
 @app.post("/api/series-folders/include")
 def include_series_folder(body: SeriesFolderRef):
-    excluded = get_excluded_series()
+    excluded = db.get_excluded_series()
     excluded.discard((body.platform, body.series))
-    set_excluded_series(excluded)
-
-    s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
+    db.set_excluded_series(excluded)
+    _rescan_and_replace_catalog()
     log.info(f"시리즈 폴더 다시 포함: {body.platform}/{body.series}")
     return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
-# zip 내부 이미지 처리
+# 시리즈 목록 / 조회
 # ---------------------------------------------------------------------------
-
-
-def _list_images(zip_path: str):
-    with zipfile.ZipFile(zip_path) as zf:
-        names = [
-            n
-            for n in zf.namelist()
-            if not n.endswith("/") and os.path.splitext(n)[1].lower() in IMAGE_EXTS
-        ]
-    names.sort(key=natural_key)
-    return names
-
-
-# ---------------------------------------------------------------------------
-# 화 전환 시 중복(리캡) 페이지 감지 — 다음 화 맨 앞부분이 이전 화 끝부분과
-# 픽셀 단위로 겹치는지 이미지 매칭으로 확인하고, 겹치는 만큼 건너뛸 수 있게 함.
-# ---------------------------------------------------------------------------
-
-OVERLAP_THRESHOLD = 0.9  # 이 이상이면 "같은 페이지"로 판단 (실측: 진짜 겹침 0.99+, 무관한 페이지 0.3~0.55)
-OVERLAP_MAX_CHECK = 10  # 다음 화 맨 앞에서 최대 몇 장까지 검사할지
-OVERLAP_TAIL_PAGES = 15  # 이전 화 끝에서 몇 장을 검색 대상으로 삼을지
-
-
-def _stitch_gray_vertical(zip_path: str, image_names: list):
-    """zip 안의 이미지 여러 장을 세로로 이어붙여 흑백 numpy 배열로 반환."""
-    if not image_names:
-        return None
-    imgs = []
-    with zipfile.ZipFile(zip_path) as zf:
-        for name in image_names:
-            raw = zf.read(name)
-            imgs.append(Image.open(io.BytesIO(raw)).convert("L"))
-    width = imgs[0].width
-    total_height = sum(im.height for im in imgs)
-    canvas = Image.new("L", (width, total_height))
-    y = 0
-    for im in imgs:
-        if im.width != width:
-            im = im.resize((width, max(1, round(im.height * width / im.width))))
-        canvas.paste(im, (0, y))
-        y += im.height
-    return np.array(canvas)
-
-
-def compute_overlap_pages(prev_zip_path: str, next_zip_path: str) -> int:
-    """다음 화 zip 맨 앞부터 몇 장이 이전 화 zip 끝부분과 겹치는지 계산."""
-    try:
-        prev_names = _list_images(prev_zip_path)
-        next_names = _list_images(next_zip_path)
-        if not prev_names or not next_names:
-            return 0
-
-        search = _stitch_gray_vertical(prev_zip_path, prev_names[-OVERLAP_TAIL_PAGES:])
-        if search is None:
-            return 0
-
-        count = 0
-        with zipfile.ZipFile(next_zip_path) as zf:
-            for name in next_names[:OVERLAP_MAX_CHECK]:
-                raw = zf.read(name)
-                template = np.array(Image.open(io.BytesIO(raw)).convert("L"))
-                if template.shape[0] > search.shape[0] or template.shape[1] != search.shape[1]:
-                    break
-                result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(result)
-                if max_val >= OVERLAP_THRESHOLD:
-                    count += 1
-                else:
-                    break
-
-        # 회차 전체가 겹친다고 나오면 뭔가 잘못된 것 - 안전하게 최소 1장은 남김
-        if count >= len(next_names):
-            count = len(next_names) - 1
-        return max(count, 0)
-    except Exception as e:
-        log.warning(f"회차 간 겹침 감지 실패, 건너뛰지 않음: {e}")
-        return 0
-
-
-def get_cached_overlap(next_chapter_id: str):
-    conn = _db()
-    try:
-        row = conn.execute(
-            "SELECT skip_pages FROM chapter_overlap WHERE next_chapter_id = ?",
-            (next_chapter_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
-
-
-def set_cached_overlap(next_chapter_id: str, prev_chapter_id: str, skip_pages: int):
-    conn = _db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO chapter_overlap (next_chapter_id, prev_chapter_id, skip_pages, computed_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(next_chapter_id) DO UPDATE SET
-                prev_chapter_id = excluded.prev_chapter_id,
-                skip_pages = excluded.skip_pages,
-                computed_at = excluded.computed_at
-            """,
-            (next_chapter_id, prev_chapter_id, skip_pages, datetime.datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-_precompute_lock = asyncio.Lock()
-
-
-async def precompute_overlaps():
-    """
-    재스캔 직후 호출되는 백그라운드 작업. 아직 계산된 적 없는 화 전환(연속된 두 회차)만
-    골라서 겹침을 미리 계산해 캐싱해둔다. 요청 처리를 막지 않도록 각 계산은 스레드로 돌리고,
-    이미 실행 중이면 중복 실행하지 않는다.
-    """
-    if _precompute_lock.locked():
-        return
-    async with _precompute_lock:
-        pending = []
-        for s in _catalog["series"].values():
-            chapters = s["chapters"]
-            for i in range(1, len(chapters)):
-                next_id = chapters[i]["id"]
-                if get_cached_overlap(next_id) is None:
-                    pending.append((chapters[i - 1], chapters[i]))
-
-        if not pending:
-            return
-
-        log.info(f"화 전환 겹침 사전 계산 시작 - {len(pending)}건")
-        computed = 0
-        skipped_found = 0
-        for prev_ch, next_ch in pending:
-            try:
-                skip_pages = await asyncio.to_thread(
-                    compute_overlap_pages, prev_ch["path"], next_ch["path"]
-                )
-                set_cached_overlap(next_ch["id"], prev_ch["id"], skip_pages)
-                computed += 1
-                if skip_pages > 0:
-                    skipped_found += 1
-            except Exception:
-                log.exception(f"겹침 사전 계산 실패 (건너뛰고 계속): {next_ch['id']}")
-        log.info(
-            f"화 전환 겹침 사전 계산 완료 - {computed}/{len(pending)}건 처리, "
-            f"그중 겹침 발견 {skipped_found}건"
-        )
-
-
-# 썸네일(시리즈 커버)은 원본을 그대로 주지 않고 리사이즈+압축해서 캐싱한다.
-# 웹툰 첫 페이지는 세로로 아주 긴 원본 이미지(수 MB)인 경우가 흔해서,
-# 그대로 내려주면 모바일에서 목록 화면이 매우 느려지고 무거워진다.
-COVER_MAX_WIDTH = 320
-_cover_cache = {}  # series_id -> (source_mtime, jpeg_bytes)
-
-
-def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
-    with zipfile.ZipFile(zip_path) as zf:
-        raw = zf.read(image_name)
-    try:
-        img = Image.open(io.BytesIO(raw))
-        img = img.convert("RGB")
-        if img.width > COVER_MAX_WIDTH:
-            ratio = COVER_MAX_WIDTH / img.width
-            new_height = max(1, round(img.height * ratio))
-            img = img.resize((COVER_MAX_WIDTH, new_height), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=78, optimize=True)
-        return buf.getvalue(), "image/jpeg"
-    except Exception as e:
-        # 변환에 실패해도(손상/미지원 포맷 등) 최소한 원본이라도 보여준다
-        log.warning(f"커버 이미지 변환 실패, 원본으로 대체 - {zip_path}::{image_name} ({e})")
-        ext = os.path.splitext(image_name)[1].lower()
-        return raw, IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream")
-
-
-# ---------------------------------------------------------------------------
-# API
-# ---------------------------------------------------------------------------
-
-
-def _chapter_number_part(label: str) -> str:
-    """라벨에서 제목 부분(' · ' 뒤)을 떼고 회차 번호 부분만 반환."""
-    return label.split(" · ", 1)[0]
 
 
 @app.get("/api/series")
 def list_series():
-    all_progress = get_all_progress()
+    all_progress = db.get_all_progress()
     result = []
-    for s in _catalog["series"].values():
-        total = len(s["chapters"])
-        prog = all_progress.get(s["id"])
+    for series in catalog.get_series_map().values():
+        total = len(series["chapters"])
+        prog = all_progress.get(series["id"])
         # 진행률 기록이 없으면 전부 안읽음, 있으면 마지막으로 본 회차 이후를 안읽음으로 취급
         unread = total if not prog else max(total - prog["chapter_index"] - 1, 0)
 
@@ -723,23 +163,23 @@ def list_series():
         else:
             # 다음에 읽어야 할(또는 읽는 중인) 회차 번호 / 마지막 회차 번호
             next_idx = max(0, min(total - unread, total - 1))
-            current_label = _chapter_number_part(s["chapters"][next_idx]["label"])
-            last_label = _chapter_number_part(s["chapters"][-1]["label"])
+            current_label = _chapter_number_part(series["chapters"][next_idx]["label"])
+            last_label = _chapter_number_part(series["chapters"][-1]["label"])
             progress_display = f"{current_label}/{last_label}"
 
         result.append(
             {
-                "id": s["id"],
-                "platform": s["platform"],
-                "title": s["title"],
+                "id": series["id"],
+                "platform": series["platform"],
+                "title": series["title"],
                 "chapter_count": total,
                 "unread_count": unread,
                 "progress_display": progress_display,
-                "latest_update": s["latest_mtime"],
-                "cover_url": f"/api/series/{s['id']}/cover",
+                "latest_update": series["latest_mtime"],
+                "cover_url": f"/api/series/{series['id']}/cover",
             }
         )
-    result.sort(key=lambda x: (x["platform"], x["title"]))
+    result.sort(key=lambda item: (item["platform"], item["title"]))
     return result
 
 
@@ -747,19 +187,20 @@ def list_series():
 def lookup_latest(platform: str, series: str):
     """
     hermes(webtoon_checker.py 등)가 디스코드 알림에 붙일 바로가기 URL을 구할 때 쓰는 API.
-    플랫폼 폴더명(예: naver)과 시리즈 폴더명을 정확히 알고 있을 때, 그 시리즈의
-    최신 화로 바로 가는 URL을 돌려준다.
+    플랫폼 폴더명과 시리즈 폴더명을 정확히 알고 있을 때, 그 시리즈의 최신 화로 바로 가는
+    URL을 돌려준다. platform 값은 /library 아래 실제 폴더명과 정확히 같아야 한다
+    (예: 폴더가 "네이버"면 여기도 "네이버" - 영문 "naver"를 하드코딩해두면 어긋난다).
     """
-    for s in _catalog["series"].values():
-        if s["platform"] == platform and s["title"] == series:
-            if not s["chapters"]:
+    for candidate in catalog.get_series_map().values():
+        if candidate["platform"] == platform and candidate["title"] == series:
+            if not candidate["chapters"]:
                 raise HTTPException(404, "series has no chapters")
-            latest = s["chapters"][-1]
+            latest = candidate["chapters"][-1]
             url = None
             if PUBLIC_BASE_URL:
-                url = f"{PUBLIC_BASE_URL}/reader.html?series={s['id']}&chapter={latest['id']}&page=0"
+                url = f"{PUBLIC_BASE_URL}/reader.html?series={candidate['id']}&chapter={latest['id']}&page=0"
             return {
-                "series_id": s["id"],
+                "series_id": candidate["id"],
                 "chapter_id": latest["id"],
                 "chapter_label": latest["label"],
                 "url": url,
@@ -769,28 +210,28 @@ def lookup_latest(platform: str, series: str):
 
 @app.get("/api/series/{series_id}/continue")
 def continue_reading(series_id: str):
-    """이 시리즈를 열었을 때 바로 이동해야 할 (회차, 페이지) 반환"""
-    s = _catalog["series"].get(series_id)
-    if not s:
+    """이 시리즈를 열었을 때 바로 이동해야 할 (회차, 페이지) 반환."""
+    series = catalog.get_series(series_id)
+    if not series:
         raise HTTPException(404, "series not found")
-    if not s["chapters"]:
+    if not series["chapters"]:
         raise HTTPException(404, "no chapters")
 
-    prog = get_progress(series_id)
+    prog = db.get_progress(series_id)
     if prog:
-        idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == prog["chapter_id"]), None)
+        idx = next((i for i, ch in enumerate(series["chapters"]) if ch["id"] == prog["chapter_id"]), None)
         if idx is not None:
-            page_count = len(_list_images(s["chapters"][idx]["path"]))
+            page_count = len(scan.list_zip_image_names(series["chapters"][idx]["path"]))
             # 저장된 page_index가 실제 페이지 수 이상이면 "이 회차는 다 읽음" 신호 ->
             # 다음 화가 있으면 그쪽으로, 없으면(마지막 화) 마지막 페이지로 보정
-            if prog["page_index"] >= page_count and idx + 1 < len(s["chapters"]):
-                nxt = s["chapters"][idx + 1]
-                return {"chapter_id": nxt["id"], "page_index": 0}
+            if prog["page_index"] >= page_count and idx + 1 < len(series["chapters"]):
+                next_chapter = series["chapters"][idx + 1]
+                return {"chapter_id": next_chapter["id"], "page_index": 0}
             clamped_page = min(prog["page_index"], max(page_count - 1, 0))
             return {"chapter_id": prog["chapter_id"], "page_index": clamped_page}
 
-    first = s["chapters"][0]
-    return {"chapter_id": first["id"], "page_index": 0}
+    first_chapter = series["chapters"][0]
+    return {"chapter_id": first_chapter["id"], "page_index": 0}
 
 
 class ProgressIn(BaseModel):
@@ -800,13 +241,13 @@ class ProgressIn(BaseModel):
 
 @app.put("/api/series/{series_id}/progress")
 def save_progress(series_id: str, body: ProgressIn):
-    s = _catalog["series"].get(series_id)
-    if not s:
+    series = catalog.get_series(series_id)
+    if not series:
         raise HTTPException(404, "series not found")
-    idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == body.chapter_id), None)
+    idx = next((i for i, ch in enumerate(series["chapters"]) if ch["id"] == body.chapter_id), None)
     if idx is None:
         raise HTTPException(404, "chapter not found in series")
-    set_progress(series_id, body.chapter_id, idx, max(body.page_index, 0))
+    db.set_progress(series_id, body.chapter_id, idx, max(body.page_index, 0))
     return {"ok": True}
 
 
@@ -818,10 +259,10 @@ class ReadStateIn(BaseModel):
 
 @app.put("/api/series/{series_id}/read-state")
 def set_read_state(series_id: str, body: ReadStateIn):
-    s = _catalog["series"].get(series_id)
-    if not s:
+    series = catalog.get_series(series_id)
+    if not series:
         raise HTTPException(404, "series not found")
-    chapters = s["chapters"]
+    chapters = series["chapters"]
     if not chapters:
         raise HTTPException(404, "no chapters")
 
@@ -830,11 +271,11 @@ def set_read_state(series_id: str, body: ReadStateIn):
     elif body.scope == "chapter":
         if not body.chapter_id:
             raise HTTPException(400, "chapter_id is required for scope=chapter")
-        idx = next((i for i, c in enumerate(chapters) if c["id"] == body.chapter_id), None)
+        idx = next((i for i, ch in enumerate(chapters) if ch["id"] == body.chapter_id), None)
         if idx is None:
             raise HTTPException(404, "chapter not found in series")
 
-        prog = get_progress(series_id)
+        prog = db.get_progress(series_id)
         current_index = prog["chapter_index"] if prog else -1
 
         if body.read:
@@ -848,8 +289,70 @@ def set_read_state(series_id: str, body: ReadStateIn):
     else:
         raise HTTPException(400, "scope must be 'all' or 'chapter'")
 
-    apply_read_boundary(series_id, chapters, target_index)
+    db.apply_read_boundary(series_id, chapters, target_index)
     return {"ok": True}
+
+
+@app.get("/api/series/{series_id}/chapters")
+def list_chapters(series_id: str):
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    prog = db.get_progress(series_id)
+    read_index = prog["chapter_index"] if prog else -1
+    page_index = prog["page_index"] if prog else 0
+
+    chapters_out = []
+    for i, chapter in enumerate(series["chapters"]):
+        if i < read_index or (i == read_index and page_index >= db.PAGE_FINISHED_SENTINEL):
+            is_read, is_reading = True, False
+        elif i == read_index:
+            # 마지막으로 저장된 위치가 이 회차 안이고, 아직 "다 읽음" 신호(SENTINEL)가 아니면 읽는 중
+            is_read, is_reading = False, True
+        else:
+            is_read, is_reading = False, False
+        chapters_out.append(
+            {
+                "id": chapter["id"],
+                "label": chapter["label"],
+                "sort_key": chapter["sort_key"],
+                "read": is_read,
+                "reading": is_reading,
+            }
+        )
+
+    return {
+        "id": series["id"],
+        "platform": series["platform"],
+        "title": series["title"],
+        "chapters": chapters_out,
+    }
+
+
+@app.get("/api/series/{series_id}/cover")
+def series_cover(series_id: str):
+    series = catalog.get_series(series_id)
+    if not series or not series["chapters"]:
+        raise HTTPException(404, "no cover")
+    first_chapter = series["chapters"][0]
+    names = scan.list_zip_image_names(first_chapter["path"])
+    if not names:
+        raise HTTPException(404, "no cover image")
+
+    try:
+        source_mtime = os.path.getmtime(first_chapter["path"])
+    except OSError:
+        source_mtime = 0
+
+    cached = covers.get_cached_cover(series_id, source_mtime)
+    if cached:
+        data, media_type = cached
+    else:
+        data, media_type = covers.generate_and_cache_cover(
+            series_id, source_mtime, first_chapter["path"], names[0]
+        )
+
+    return Response(content=data, media_type=media_type)
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +362,7 @@ def set_read_state(series_id: str, body: ReadStateIn):
 
 @app.get("/api/settings/{key}")
 def read_setting(key: str):
-    return {"key": key, "value": get_setting(key)}
+    return {"key": key, "value": db.get_setting(key)}
 
 
 class SettingIn(BaseModel):
@@ -868,7 +371,7 @@ class SettingIn(BaseModel):
 
 @app.put("/api/settings/{key}")
 def write_setting(key: str, body: SettingIn):
-    set_setting(key, body.value)
+    db.set_setting(key, body.value)
     return {"ok": True}
 
 
@@ -876,38 +379,19 @@ def write_setting(key: str, body: SettingIn):
 # 백업 / 복원 (읽음 진행률 + 검색/정렬/필터 설정 + 라이브러리 등록 상태 전부)
 # ---------------------------------------------------------------------------
 
-BACKUP_VERSION = 1
-
 
 @app.get("/api/backup")
 def export_backup():
-    conn = _db()
-    try:
-        progress_rows = conn.execute(
-            "SELECT series_id, chapter_id, chapter_index, page_index, updated_at FROM progress"
-        ).fetchall()
-        settings_rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
-    finally:
-        conn.close()
-
+    data = db.export_backup_data()
     payload = {
         "version": BACKUP_VERSION,
-        "exported_at": datetime.datetime.utcnow().isoformat(),
-        "progress": [
-            {
-                "series_id": r[0],
-                "chapter_id": r[1],
-                "chapter_index": r[2],
-                "page_index": r[3],
-                "updated_at": r[4],
-            }
-            for r in progress_rows
-        ],
-        "app_settings": [{"key": r[0], "value": r[1]} for r in settings_rows],
+        "exported_at": datetime.utcnow().isoformat(),
+        "progress": data["progress"],
+        "app_settings": data["app_settings"],
     }
     body = json.dumps(payload, ensure_ascii=False, indent=2)
-    filename = f"webtoon-server-backup-{datetime.date.today().isoformat()}.json"
-    log.info(f"백업 생성 - progress {len(payload['progress'])}건, settings {len(payload['app_settings'])}건")
+    filename = f"webtoon-server-backup-{date.today().isoformat()}.json"
+    log.info(f"백업 생성 - progress {len(data['progress'])}건, settings {len(data['app_settings'])}건")
     return Response(
         content=body,
         media_type="application/json",
@@ -923,123 +407,26 @@ class RestorePayload(BaseModel):
 
 @app.post("/api/restore")
 def import_backup(body: RestorePayload):
-    conn = _db()
-    try:
-        conn.execute("DELETE FROM progress")
-        conn.execute("DELETE FROM app_settings")
+    progress_count, settings_count = db.import_backup_data(body.progress, body.app_settings)
 
-        progress_count = 0
-        for p in body.progress:
-            series_id = p.get("series_id")
-            chapter_id = p.get("chapter_id")
-            if not series_id or not chapter_id:
-                continue
-            conn.execute(
-                """
-                INSERT INTO progress (series_id, chapter_id, chapter_index, page_index, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    series_id,
-                    chapter_id,
-                    int(p.get("chapter_index", 0)),
-                    int(p.get("page_index", 0)),
-                    p.get("updated_at") or datetime.datetime.utcnow().isoformat(),
-                ),
-            )
-            progress_count += 1
-
-        settings_count = 0
-        for s in body.app_settings:
-            key = s.get("key")
-            if not key:
-                continue
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES (?, ?)",
-                (key, s.get("value", "")),
-            )
-            settings_count += 1
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    # 라이브러리 등록 상태도 복원됐을 수 있으니 다시 스캔해서 반영
-    s, c = scan_library()
-    _catalog["series"] = s
-    _catalog["chapters"] = c
+    # 라이브러리 등록(제외 목록) 상태도 복원됐을 수 있으니 다시 스캔해서 반영
+    _rescan_and_replace_catalog()
 
     log.info(f"백업 복원 완료 - progress {progress_count}건, settings {settings_count}건")
     return {"ok": True, "progress_count": progress_count, "settings_count": settings_count}
 
 
-@app.get("/api/series/{series_id}/chapters")
-def list_chapters(series_id: str):
-    s = _catalog["series"].get(series_id)
-    if not s:
-        raise HTTPException(404, "series not found")
-    prog = get_progress(series_id)
-    read_index = prog["chapter_index"] if prog else -1
-    page_index = prog["page_index"] if prog else 0
-
-    chapters_out = []
-    for i, c in enumerate(s["chapters"]):
-        if i < read_index or (i == read_index and page_index >= PAGE_FINISHED_SENTINEL):
-            is_read, is_reading = True, False
-        elif i == read_index:
-            # 마지막으로 저장된 위치가 이 회차 안이고, 아직 "다 읽음" 신호(SENTINEL)가 아니면 읽는 중
-            is_read, is_reading = False, True
-        else:
-            is_read, is_reading = False, False
-        chapters_out.append(
-            {
-                "id": c["id"],
-                "label": c["label"],
-                "sort_key": c["sort_key"],
-                "read": is_read,
-                "reading": is_reading,
-            }
-        )
-
-    return {
-        "id": s["id"],
-        "platform": s["platform"],
-        "title": s["title"],
-        "chapters": chapters_out,
-    }
-
-
-@app.get("/api/series/{series_id}/cover")
-def series_cover(series_id: str):
-    s = _catalog["series"].get(series_id)
-    if not s or not s["chapters"]:
-        raise HTTPException(404, "no cover")
-    first_chapter = s["chapters"][0]
-    names = _list_images(first_chapter["path"])
-    if not names:
-        raise HTTPException(404, "no cover image")
-
-    try:
-        source_mtime = os.path.getmtime(first_chapter["path"])
-    except OSError:
-        source_mtime = 0
-
-    cached = _cover_cache.get(series_id)
-    if cached and cached[0] == source_mtime:
-        data, media_type = cached[1], cached[2]
-    else:
-        data, media_type = _generate_cover_bytes(first_chapter["path"], names[0])
-        _cover_cache[series_id] = (source_mtime, data, media_type)
-
-    return Response(content=data, media_type=media_type)
+# ---------------------------------------------------------------------------
+# zip 내부 이미지 / 화 전환 겹침
+# ---------------------------------------------------------------------------
 
 
 @app.get("/api/chapters/{chapter_id}/pages")
 def chapter_pages(chapter_id: str):
-    zip_path = _catalog["chapters"].get(chapter_id)
+    zip_path = catalog.get_chapter_zip_path(chapter_id)
     if not zip_path:
         raise HTTPException(404, "chapter not found")
-    names = _list_images(zip_path)
+    names = scan.list_zip_image_names(zip_path)
     return {"page_count": len(names)}
 
 
@@ -1049,27 +436,24 @@ def chapter_overlap(chapter_id: str):
     이 회차 맨 앞부분이 바로 이전 회차(같은 시리즈, 정렬상 직전) 끝부분과 겹치는
     페이지 수를 반환. 결과는 DB에 캐싱되어 다음부터는 즉시 응답한다.
     """
-    zip_path = _catalog["chapters"].get(chapter_id)
+    zip_path = catalog.get_chapter_zip_path(chapter_id)
     if not zip_path:
         raise HTTPException(404, "chapter not found")
 
+    series, index = catalog.find_chapter_position(chapter_id)
     prev_chapter = None
-    for s in _catalog["series"].values():
-        idx = next((i for i, c in enumerate(s["chapters"]) if c["id"] == chapter_id), None)
-        if idx is not None:
-            if idx > 0:
-                prev_chapter = s["chapters"][idx - 1]
-            break
+    if series is not None and index is not None and index > 0:
+        prev_chapter = series["chapters"][index - 1]
 
     if not prev_chapter:
         return {"skip_pages": 0}
 
-    cached = get_cached_overlap(chapter_id)
+    cached = db.get_cached_overlap(chapter_id)
     if cached is not None:
         return {"skip_pages": cached}
 
-    skip_pages = compute_overlap_pages(prev_chapter["path"], zip_path)
-    set_cached_overlap(chapter_id, prev_chapter["id"], skip_pages)
+    skip_pages = overlap.compute_overlap_pages(prev_chapter["path"], zip_path)
+    db.set_cached_overlap(chapter_id, prev_chapter["id"], skip_pages)
     if skip_pages > 0:
         log.info(f"화 전환 겹침 감지: {chapter_id} 앞부분 {skip_pages}페이지가 이전 화와 중복 (자동 건너뜀)")
     return {"skip_pages": skip_pages}
@@ -1077,17 +461,17 @@ def chapter_overlap(chapter_id: str):
 
 @app.get("/api/chapters/{chapter_id}/pages/{page_index}")
 def chapter_page(chapter_id: str, page_index: int):
-    zip_path = _catalog["chapters"].get(chapter_id)
+    zip_path = catalog.get_chapter_zip_path(chapter_id)
     if not zip_path:
         raise HTTPException(404, "chapter not found")
-    names = _list_images(zip_path)
+    names = scan.list_zip_image_names(zip_path)
     if page_index < 0 or page_index >= len(names):
         raise HTTPException(404, "page not found")
     name = names[page_index]
     ext = os.path.splitext(name)[1].lower()
     with zipfile.ZipFile(zip_path) as zf:
         data = zf.read(name)
-    return Response(content=data, media_type=IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream"))
+    return Response(content=data, media_type=covers.IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream"))
 
 
 # ---------------------------------------------------------------------------
