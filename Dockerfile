@@ -2,8 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# TZ 환경변수가 실제로 동작하려면 시간대 데이터가 필요함
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+# TZ 환경변수 동작에 필요한 시간대 데이터 + opencv-python-headless가 필요로 하는 라이브러리
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
