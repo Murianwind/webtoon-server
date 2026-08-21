@@ -14,6 +14,7 @@
 </header>
 
 <div id="pages" class="pages"></div>
+<div id="positioningOverlay" class="positioning-overlay" style="display:none">이어보던 위치로 이동 중…</div>
 
 <aside id="sidebar" class="sidebar">
   <div class="sidebar-header">
@@ -45,6 +46,20 @@ const sidebarListEl = document.getElementById("sidebarList");
 
 function showError() {
   pagesEl.innerHTML = `<div class="empty-state">회차를 불러올 수 없습니다.</div>`;
+}
+
+let positioningTimer = null;
+const positioningOverlayEl = document.getElementById("positioningOverlay");
+
+function beginPositioning() {
+  pagesEl.classList.add("positioning");
+  positioningOverlayEl.style.display = "flex";
+}
+
+function revealPages() {
+  clearTimeout(positioningTimer);
+  pagesEl.classList.remove("positioning");
+  positioningOverlayEl.style.display = "none";
 }
 
 function chapterById(id) {
@@ -146,9 +161,20 @@ async function appendChapter(chapter, { scrollToPage = null } = {}) {
   loadedChapters.push({ id: chapter.id, pageCount, firstImg });
 
   if (targetImg) {
-    const scrollNow = () => targetImg.scrollIntoView({ block: "start" });
-    if (targetImg.complete) scrollNow();
-    else targetImg.addEventListener("load", scrollNow, { once: true });
+    const scrollNow = () => {
+      targetImg.scrollIntoView({ block: "start" });
+      revealPages();
+    };
+    if (targetImg.complete) {
+      scrollNow();
+    } else {
+      targetImg.addEventListener("load", scrollNow, { once: true });
+      targetImg.addEventListener("error", revealPages, { once: true });
+      // 안전장치: 이미지가 너무 오래 걸리면 무한정 가려두지 않고 그냥 보여줌
+      positioningTimer = setTimeout(revealPages, 4000);
+    }
+  } else if (pagesEl.classList.contains("positioning")) {
+    revealPages();
   }
 
   const idx = chapterIndexById(chapter.id);
@@ -280,6 +306,8 @@ async function load() {
   currentPageIndex = initialPage;
   chapterTitleEl.textContent = `${seriesData.title} · ${startChapter.label}`;
   highlightSidebar();
+
+  if (initialPage > 0) beginPositioning();
 
   await appendChapter(startChapter, { scrollToPage: initialPage });
 }
