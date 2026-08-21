@@ -622,31 +622,36 @@ a {
 }
 
 .overlap-reveal-wrap {
+  /* 레이아웃 흐름에서 공간을 차지하지 않게(높이 0) 해서 이미지 사이에 틈이 안 생기게 함.
+     버튼은 이 지점 위에 절대위치로 살짝 겹쳐서 떠 있음 */
+  position: relative;
+  height: 0;
   width: 100%;
   max-width: 720px;
-  display: flex;
-  justify-content: flex-end;
-  padding: 6px 10px;
-  box-sizing: border-box;
 }
 
 .overlap-reveal-btn {
-  width: 34px;
-  height: 34px;
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
   border-radius: 999px;
-  border: 1.5px solid var(--accent);
-  background: rgba(10, 11, 13, 0.82); /* 웹툰 배경이 흰색이든 검은색이든 항상 대비되도록 자체 배경 */
-  color: #fff;
-  font-size: 14px;
-  line-height: 1;
-  letter-spacing: 1px;
+  border: 1.5px solid #ffb35c;
+  background: rgba(10, 11, 13, 0.75); /* 웹툰 배경이 흰색이든 검은색이든 항상 대비되도록 자체 배경 */
+  color: #ffb35c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
-  opacity: 0.7;
+  opacity: 0.75;
+  z-index: 5;
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 .overlap-reveal-btn:hover {
   opacity: 1;
-  transform: scale(1.08);
+  transform: translateY(-50%) scale(1.1);
 }
 .overlap-reveal-btn:disabled {
   display: none;

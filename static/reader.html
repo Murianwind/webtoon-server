@@ -210,7 +210,10 @@ async function appendChapter(chapter, { scrollToPage = null, skipPages = 0 } = {
     revealBtn.className = "overlap-reveal-btn";
     revealBtn.title = "이전 화와 겹치는 페이지 펼쳐보기";
     revealBtn.setAttribute("aria-label", "건너뛴 페이지 펼쳐보기");
-    revealBtn.textContent = "⋯";
+    revealBtn.innerHTML =
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="3" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="6 9 12 15 18 9"></polyline></svg>';
     revealBtn.addEventListener("click", () => revealSkippedPages(chapter, startPage, wrap));
     wrap.appendChild(revealBtn);
     pagesEl.appendChild(wrap);
