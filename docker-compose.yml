@@ -3,7 +3,7 @@ services:
     build: .
     container_name: webtoon-server
     ports:
-      - "25601:8000"
+      - "25600:8000"
     volumes:
       # 왼쪽(호스트 경로)을 실제 PC 폴더로 맞춰주세요.
       # 오른쪽(/library/<플랫폼명>)은 코드가 "플랫폼 폴더"로 인식하는 이름입니다.
