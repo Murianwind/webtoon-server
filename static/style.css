@@ -156,6 +156,26 @@ a {
   font-weight: 600;
 }
 
+.filter-tab-divider {
+  flex-shrink: 0;
+  width: 1px;
+  margin: 4px 4px;
+  background: var(--border);
+}
+
+.genre-tab {
+  font-size: 12px;
+  padding: 6px 12px;
+  color: var(--text-dim);
+  background: transparent;
+}
+.genre-tab.active {
+  background: rgba(41, 209, 127, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* ---------- 읽음/안읽음 처리 패널 (index.html) ---------- */
 
 .read-action-panel {

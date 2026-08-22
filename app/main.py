@@ -220,7 +220,7 @@ def list_series():
                 "progress_display": progress_display,
                 "latest_update": series["latest_mtime"],
                 "cover_url": f"/api/series/{series['id']}/cover",
-                "series_status": info["series_status"] if info else None,
+                "genres": info["genres"] if info else [],
             }
         )
     result.sort(key=lambda item: (item["platform"], item["title"]))

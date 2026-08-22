@@ -94,6 +94,7 @@ let allSeries = [];
 let query = localStorage.getItem(LS_QUERY) || "";
 let sortMode = localStorage.getItem(LS_SORT) || "latest";
 let selectedStatuses = new Set(); // 비어있으면 "전체" (서버에서 로드되기 전까지의 기본값)
+let selectedGenre = null; // info.xml이 있는 시리즈에서 뽑은 장르 태그 (한 번에 하나만)
 
 let selectedIds = new Set(); // 다중 선택
 let actionMode = null; // null | "chapter-read" | "chapter-unread"
@@ -157,6 +158,29 @@ function renderFilterTabs() {
     });
     container.appendChild(btn);
   }
+
+  // info.xml에 장르가 있는 시리즈들에서 뽑은 태그 - 지금 로드된 시리즈 목록 기준으로 매번 새로 구성
+  const genreSet = new Set();
+  for (const s of allSeries) {
+    for (const g of s.genres || []) genreSet.add(g);
+  }
+  if (genreSet.size > 0) {
+    const divider = document.createElement("span");
+    divider.className = "filter-tab-divider";
+    container.appendChild(divider);
+
+    for (const genre of [...genreSet].sort((a, b) => a.localeCompare(b, "ko"))) {
+      const btn = document.createElement("button");
+      btn.className = "filter-tab genre-tab" + (selectedGenre === genre ? " active" : "");
+      btn.textContent = genre;
+      btn.addEventListener("click", () => {
+        selectedGenre = selectedGenre === genre ? null : genre;
+        renderFilterTabs();
+        render();
+      });
+      container.appendChild(btn);
+    }
+  }
 }
 
 function render() {
@@ -166,12 +190,15 @@ function render() {
   if (selectedStatuses.size > 0) {
     filtered = filtered.filter((s) => selectedStatuses.has(seriesStatus(s)));
   }
+  if (selectedGenre) {
+    filtered = filtered.filter((s) => (s.genres || []).includes(selectedGenre));
+  }
   const list = sortSeries(filtered);
 
   if (!list.length) {
     const msg = q
       ? "검색 결과가 없습니다."
-      : selectedStatuses.size > 0
+      : selectedStatuses.size > 0 || selectedGenre
       ? "해당하는 웹툰이 없습니다."
       : "스캔된 웹툰이 없습니다.<br>라이브러리 폴더를 확인해주세요.";
     grid.innerHTML = `<div class="empty-state">${msg}</div>`;
@@ -185,7 +212,7 @@ function render() {
     card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${s.platform}${s.series_status === "완결" ? " · 완결" : ""}</span>
+        <span class="platform-tag">${s.platform}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
         <button class="chapter-list-toggle" title="회차 목록" aria-label="회차 목록">≡</button>
@@ -392,7 +419,10 @@ async function fetchScanStatus() {
 
 async function load() {
   const ok = await fetchSeries();
-  if (ok) render();
+  if (ok) {
+    renderFilterTabs(); // 재스캔으로 새 장르가 생겼을 수도 있으니 같이 갱신
+    render();
+  }
   fetchScanStatus();
 }
 
@@ -639,9 +669,8 @@ async function renderSeriesInfoPanel(seriesId) {
   const rows = [];
   if (info.writer) rows.push(`<div class="series-info-row"><b>작가</b> ${info.writer}</div>`);
   if (info.genre) rows.push(`<div class="series-info-row"><b>장르</b> ${info.genre}</div>`);
-  if (info.series_status) rows.push(`<div class="series-info-row"><b>연재상태</b> ${info.series_status}</div>`);
   if (info.age_rating) rows.push(`<div class="series-info-row"><b>연령등급</b> ${info.age_rating}</div>`);
-  if (info.summary) rows.push(`<div class="series-info-summary">${info.summary.replace(/\n/g, "<br>")}</div>`);
+  if (info.summary) rows.push(`<div class="series-info-summary">${info.summary.replace(/\s*\n\s*/g, " ").trim()}</div>`);
   if (info.web_url) rows.push(`<a class="series-info-link" href="${info.web_url}" target="_blank" rel="noopener">원작 페이지 열기 ↗</a>`);
 
   if (rows.length === 0) return;

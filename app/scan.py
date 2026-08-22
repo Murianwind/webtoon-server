@@ -249,6 +249,8 @@ def _parse_series_info(series_path: str) -> dict | None:
     """
     시리즈 폴더의 info.xml(ComicInfo 표준 포맷)을 읽어 표시에 쓸만한 필드만 뽑아 반환.
     파일이 없거나 파싱에 실패하면 None (네이버 등 info.xml이 없는 플랫폼에서는 항상 None).
+
+    SeriesStatus(연재/완결)는 실제로 값이 정확하지 않은 경우가 있어 아예 뽑지 않는다.
     """
     info_path = os.path.join(series_path, INFO_FILENAME)
     if not os.path.isfile(info_path):
@@ -263,14 +265,17 @@ def _parse_series_info(series_path: str) -> dict | None:
         el = root.find(tag)
         return el.text.strip() if el is not None and el.text else ""
 
+    genre_raw = text("Genre")
+    genres = [g.strip() for g in genre_raw.split(",") if g.strip()]
+
     info = {
         "summary": text("Summary"),
         "writer": text("Writer"),
-        "genre": text("Genre"),
+        "genre": genre_raw,
+        "genres": genres,
         "age_rating": text("AgeRating"),
-        "series_status": text("SeriesStatus"),  # 예: "연재" / "완결"
         "web_url": text("Web"),
         "publisher": text("Publisher"),
     }
     # 전부 빈 값이면 사실상 쓸모없으니 None 취급
-    return info if any(info.values()) else None
+    return info if any(info[k] for k in info if k != "genres") or genres else None
