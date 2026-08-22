@@ -3,18 +3,27 @@
 
 라이브러리 구조: LIBRARY_ROOT 바로 아래 1depth = 플랫폼(예: 네이버/카카오),
 그 아래 1depth = 시리즈(웹툰) 폴더, 그 안의 zip 파일들 = 회차.
+
+일부 플랫폼(카카오 등)의 다운로드 도구는 시리즈 폴더 안에 대표 이미지(cover.jpg)와
+메타데이터(info.xml, ComicInfo 표준 포맷)를 같이 남겨두는데, 있으면 활용한다.
 """
 
 import hashlib
+import logging
 import os
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 
 from . import db
 
+log = logging.getLogger("webtoon-server")
+
 LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/library")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+COVER_FILENAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.webp"}
+INFO_FILENAME = "info.xml"
 
 
 def natural_key(name: str):
@@ -209,6 +218,8 @@ def scan_library() -> tuple[dict, dict]:
                 "path": series_path,
                 "chapters": chapters,
                 "latest_mtime": latest_mtime,
+                "cover_path": _find_series_cover(series_path),
+                "info": _parse_series_info(series_path),
             }
 
     return series_map, chapters_map
@@ -224,3 +235,42 @@ def list_zip_image_names(zip_path: str) -> list[str]:
         ]
     names.sort(key=natural_key)
     return names
+
+
+def _find_series_cover(series_path: str) -> str | None:
+    """시리즈 폴더 바로 아래 cover.jpg(류) 파일이 있으면 절대경로를, 없으면 None을 반환."""
+    for name in os.listdir(series_path):
+        if name.lower() in COVER_FILENAMES:
+            return os.path.join(series_path, name)
+    return None
+
+
+def _parse_series_info(series_path: str) -> dict | None:
+    """
+    시리즈 폴더의 info.xml(ComicInfo 표준 포맷)을 읽어 표시에 쓸만한 필드만 뽑아 반환.
+    파일이 없거나 파싱에 실패하면 None (네이버 등 info.xml이 없는 플랫폼에서는 항상 None).
+    """
+    info_path = os.path.join(series_path, INFO_FILENAME)
+    if not os.path.isfile(info_path):
+        return None
+    try:
+        root = ET.parse(info_path).getroot()
+    except Exception as e:
+        log.warning(f"info.xml 파싱 실패, 무시하고 진행: {info_path} ({e})")
+        return None
+
+    def text(tag: str) -> str:
+        el = root.find(tag)
+        return el.text.strip() if el is not None and el.text else ""
+
+    info = {
+        "summary": text("Summary"),
+        "writer": text("Writer"),
+        "genre": text("Genre"),
+        "age_rating": text("AgeRating"),
+        "series_status": text("SeriesStatus"),  # 예: "연재" / "완결"
+        "web_url": text("Web"),
+        "publisher": text("Publisher"),
+    }
+    # 전부 빈 값이면 사실상 쓸모없으니 None 취급
+    return info if any(info.values()) else None

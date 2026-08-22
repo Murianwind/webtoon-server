@@ -209,6 +209,7 @@ def list_series():
             last_label = _chapter_number_part(chapters[-1]["label"])
             progress_display = f"{current_label}/{last_label}"
 
+        info = series.get("info")
         result.append(
             {
                 "id": series["id"],
@@ -219,6 +220,7 @@ def list_series():
                 "progress_display": progress_display,
                 "latest_update": series["latest_mtime"],
                 "cover_url": f"/api/series/{series['id']}/cover",
+                "series_status": info["series_status"] if info else None,
             }
         )
     result.sort(key=lambda item: (item["platform"], item["title"]))
@@ -404,10 +406,41 @@ def list_chapters(series_id: str):
     }
 
 
+@app.get("/api/series/{series_id}/info")
+def series_info(series_id: str):
+    """
+    info.xml(카카오 등 일부 플랫폼에만 있음)에서 뽑아둔 작가/장르/줄거리/연재상태/연령등급/
+    원작 링크를 반환. info.xml이 없는 시리즈(네이버 등)는 404.
+    """
+    series = catalog.get_series(series_id)
+    if not series:
+        raise HTTPException(404, "series not found")
+    info = series.get("info")
+    if not info:
+        raise HTTPException(404, "no info available for this series")
+    return info
+
+
 @app.get("/api/series/{series_id}/cover")
 def series_cover(series_id: str):
     series = catalog.get_series(series_id)
-    if not series or not series["chapters"]:
+    if not series:
+        raise HTTPException(404, "no cover")
+
+    cover_path = series.get("cover_path")
+    if cover_path and os.path.isfile(cover_path):
+        try:
+            source_mtime = os.path.getmtime(cover_path)
+        except OSError:
+            source_mtime = 0
+        cached = covers.get_cached_cover(series_id, source_mtime)
+        if cached:
+            data, media_type = cached
+        else:
+            data, media_type = covers.generate_and_cache_cover_from_file(series_id, source_mtime, cover_path)
+        return Response(content=data, media_type=media_type)
+
+    if not series["chapters"]:
         raise HTTPException(404, "no cover")
     first_chapter = series["chapters"][0]
     names = scan.list_zip_image_names(first_chapter["path"])
@@ -423,7 +456,7 @@ def series_cover(series_id: str):
     if cached:
         data, media_type = cached
     else:
-        data, media_type = covers.generate_and_cache_cover(
+        data, media_type = covers.generate_and_cache_cover_from_zip(
             series_id, source_mtime, first_chapter["path"], names[0]
         )
 

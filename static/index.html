@@ -64,6 +64,7 @@
     <span id="chapterSidebarTitle">회차 목록</span>
     <button id="chapterSidebarClose" class="sidebar-close" aria-label="닫기">×</button>
   </div>
+  <div id="chapterSidebarInfo" class="series-info-panel" style="display:none"></div>
   <div id="chapterSidebarList" class="sidebar-list"></div>
 </aside>
 <div id="chapterSidebarOverlay" class="sidebar-overlay"></div>
@@ -184,7 +185,7 @@ function render() {
     card.className = "card" + (isSelected ? " selected" : "");
     card.innerHTML = `
       <div class="cover-wrap">
-        <span class="platform-tag">${s.platform}</span>
+        <span class="platform-tag">${s.platform}${s.series_status === "완결" ? " · 완결" : ""}</span>
         ${s.unread_count > 0 ? `<span class="unread-badge">${s.unread_count}</span>` : ""}
         <img src="${s.cover_url}" alt="${s.title}" loading="lazy">
         <button class="chapter-list-toggle" title="회차 목록" aria-label="회차 목록">≡</button>
@@ -592,6 +593,8 @@ async function openChapterSidebar(series) {
   chapterSidebar.classList.add("open");
   chapterSidebarOverlay.classList.add("open");
 
+  renderSeriesInfoPanel(series.id); // info.xml이 없으면(대부분의 네이버 등) 조용히 숨겨짐
+
   let data;
   try {
     const res = await fetch(`/api/series/${encodeURIComponent(series.id)}/chapters`);
@@ -617,6 +620,33 @@ async function openChapterSidebar(series) {
     });
     chapterSidebarList.appendChild(row);
   }
+}
+
+const chapterSidebarInfo = document.getElementById("chapterSidebarInfo");
+
+async function renderSeriesInfoPanel(seriesId) {
+  chapterSidebarInfo.style.display = "none";
+  chapterSidebarInfo.innerHTML = "";
+  let info;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(seriesId)}/info`);
+    if (!res.ok) return; // info.xml 없는 시리즈(네이버 등) - 그냥 아무것도 안 보여줌
+    info = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  const rows = [];
+  if (info.writer) rows.push(`<div class="series-info-row"><b>작가</b> ${info.writer}</div>`);
+  if (info.genre) rows.push(`<div class="series-info-row"><b>장르</b> ${info.genre}</div>`);
+  if (info.series_status) rows.push(`<div class="series-info-row"><b>연재상태</b> ${info.series_status}</div>`);
+  if (info.age_rating) rows.push(`<div class="series-info-row"><b>연령등급</b> ${info.age_rating}</div>`);
+  if (info.summary) rows.push(`<div class="series-info-summary">${info.summary.replace(/\n/g, "<br>")}</div>`);
+  if (info.web_url) rows.push(`<a class="series-info-link" href="${info.web_url}" target="_blank" rel="noopener">원작 페이지 열기 ↗</a>`);
+
+  if (rows.length === 0) return;
+  chapterSidebarInfo.innerHTML = rows.join("");
+  chapterSidebarInfo.style.display = "block";
 }
 
 function closeChapterSidebar() {

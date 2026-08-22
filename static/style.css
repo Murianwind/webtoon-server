@@ -709,6 +709,34 @@ a {
   color: var(--text);
 }
 
+.series-info-panel {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.series-info-row {
+  margin-bottom: 4px;
+}
+.series-info-row b {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.series-info-summary {
+  margin-top: 8px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.series-info-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
 .sidebar-list {
   flex: 1;
   overflow-y: auto;

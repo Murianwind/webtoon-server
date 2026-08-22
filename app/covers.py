@@ -35,15 +35,26 @@ def get_cached_cover(series_id: str, source_mtime: float) -> tuple[bytes, str] |
     return None
 
 
-def generate_and_cache_cover(series_id: str, source_mtime: float, zip_path: str, image_name: str) -> tuple[bytes, str]:
-    data, media_type = _generate_cover_bytes(zip_path, image_name)
+def generate_and_cache_cover_from_zip(series_id: str, source_mtime: float, zip_path: str, image_name: str) -> tuple[bytes, str]:
+    with zipfile.ZipFile(zip_path) as zf:
+        raw = zf.read(image_name)
+    ext = os.path.splitext(image_name)[1].lower()
+    data, media_type = _resize_and_compress(raw, ext, source_label=f"{zip_path}::{image_name}")
     _cache[series_id] = (source_mtime, data, media_type)
     return data, media_type
 
 
-def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
-    with zipfile.ZipFile(zip_path) as zf:
-        raw = zf.read(image_name)
+def generate_and_cache_cover_from_file(series_id: str, source_mtime: float, file_path: str) -> tuple[bytes, str]:
+    """cover.jpg처럼 zip 밖에 별도로 있는 대표 이미지 파일로 커버를 만든다."""
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    ext = os.path.splitext(file_path)[1].lower()
+    data, media_type = _resize_and_compress(raw, ext, source_label=file_path)
+    _cache[series_id] = (source_mtime, data, media_type)
+    return data, media_type
+
+
+def _resize_and_compress(raw: bytes, ext: str, source_label: str) -> tuple[bytes, str]:
     try:
         img = Image.open(io.BytesIO(raw))
         img = img.convert("RGB")
@@ -56,6 +67,5 @@ def _generate_cover_bytes(zip_path: str, image_name: str) -> tuple[bytes, str]:
         return buf.getvalue(), "image/jpeg"
     except Exception as e:
         # 변환에 실패해도(손상/미지원 포맷 등) 최소한 원본이라도 보여준다
-        log.warning(f"커버 이미지 변환 실패, 원본으로 대체 - {zip_path}::{image_name} ({e})")
-        ext = os.path.splitext(image_name)[1].lower()
+        log.warning(f"커버 이미지 변환 실패, 원본으로 대체 - {source_label} ({e})")
         return raw, IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream")
