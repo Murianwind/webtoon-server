@@ -296,6 +296,19 @@ def save_progress(series_id: str, body: ProgressIn):
     # 스크롤로 여기까지 왔다는 건 이 앞 회차는 다 지나왔다는 뜻이니 명시적으로 읽음 기록
     # (지금 보고 있는 회차 자체는 "읽는 중"이지 "읽음"이 아니므로 제외)
     db.mark_chapters_read(series_id, [ch["id"] for ch in chapters[:idx]])
+
+    is_last_chapter = idx == len(chapters) - 1
+    if is_last_chapter:
+        # 마지막 화는 무한스크롤로 "다음 화에 진입"하는 신호가 절대 발생하지 않아서,
+        # 그것만 보고 있으면 아무리 끝까지 읽어도 영원히 "읽는 중"에 머무르게 된다.
+        # 그래서 마지막 화에 한해서는, 실제로 마지막 페이지까지 도달했으면 그 자체를
+        # 완독으로 인정한다.
+        page_count = len(scan.list_zip_image_names(chapters[idx]["path"]))
+        if page_count > 0 and body.page_index >= page_count - 1:
+            db.mark_chapters_read(series_id, [chapters[idx]["id"]])
+            db.set_progress(series_id, body.chapter_id, idx, db.PAGE_FINISHED_SENTINEL)
+            return {"ok": True}
+
     db.set_progress(series_id, body.chapter_id, idx, max(body.page_index, 0))
     return {"ok": True}
 
